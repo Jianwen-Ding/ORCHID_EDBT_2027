@@ -379,7 +379,7 @@ void GpuIndexIVF::searchImpl_(
                     "IDSelector2DBitmap universe (%zu) is smaller than index size (%ld)",
                     bitmask->totalBitmaskCount,
                     this->ntotal);
-            FAISS_THROW_IF_NOT_FMT(
+            FAISS_THROW_IF_NOT_MSG(
                     bitmask->deviceOwnership & BitmaskOwnership::CpuAndGpuOwned,
                     "bitmask is not owned by CPU or GPU and thus cannot be used");
 
