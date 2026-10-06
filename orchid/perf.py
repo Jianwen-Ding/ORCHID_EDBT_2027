@@ -543,8 +543,12 @@ def main():
                 else:
                     cluster_scoring_time = cluster_rank_time = 0.0
                     stage_start = perf_counter()
+
                 sel = faiss.IDSelector2DBitmap(mi)
+
                 params.sel2d = sel
+                params.selBitMask = sel.getBitmask()
+
                 search_prep_time = perf_counter() - stage_start
 
                 stage_start = perf_counter()
