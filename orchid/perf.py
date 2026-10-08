@@ -500,6 +500,7 @@ def main():
                 predicate_eval_time = perf_counter() - stage_start
 
                 stage_start = perf_counter()
+                # Create GPU Alternative here (Id -> Bitmap )
                 mi = materialize_results(
                     predicate_results, n, predicate_bitmap[:size], threads=0
                 )
@@ -509,6 +510,8 @@ def main():
                     stage_start = perf_counter()
                     qi_t = queries_t[rows]
                     cluster_dis = qi_t @ centroids_t.T
+
+                    # Create GPU Alternative here (Bitmap -> Cluster percentage legal)
                     if args.alpha != 0.0 or beta != 0.0:
                         cluster_legals(
                             mi,
@@ -517,6 +520,7 @@ def main():
                             out=out_legals_batch[:size],
                             threads=0,
                         )
+                    # Ideally pull cpu from gpu here
                     if args.alpha != 0.0 or beta != 0.0:
                         pred_term = predicate_log_scores(
                             out_legals_batch[:size],
@@ -546,6 +550,7 @@ def main():
 
                 sel = faiss.IDSelector2DBitmap(mi)
 
+                # Put GPU alternative that directly puts existing bitmask buffer on gpu here 
                 params.sel2d = sel
                 params.selBitMask = sel.getBitmask()
 
