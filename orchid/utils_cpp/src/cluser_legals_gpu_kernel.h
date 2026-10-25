@@ -25,10 +25,16 @@ inline size_t roundToAlignment(size_t number) {
     return number;
 }
 
-struct 
 struct PromiseCapsule {
     void* ptr;
     std::function<void(void*)> free;
+};
+
+// Owns staging bytes without Python references or CUDA resources.
+struct CpuUploadCapsule {
+    std::vector<uint8_t> data;
+
+    explicit CpuUploadCapsule(size_t size) : data(size) {}
 };
 
 struct PromiseData {
@@ -42,6 +48,10 @@ struct PromiseData {
     ~PromiseData();
 
     const void* getData() const;
+    // Appends an aligned upload. Caller checks capacity and retains the source until sync.
+    void uploadCpuDataAsync(const void* data, size_t size);
+    // Takes ownership on success; deletes the capsule after preceding stream work.
+    void finishCpuUploadAsync(CpuUploadCapsule* capsule);
     void syncGpuData();
     PromiseCapsule collectRawCpuCopy();
 };

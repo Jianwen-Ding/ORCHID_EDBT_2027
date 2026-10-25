@@ -20,22 +20,30 @@ PromiseData::~PromiseData() {
     }
     cudaStreamDestroy(m_stream);
 }
+const void* PromiseData::getData() const {
+    return m_data;
+}
+void PromiseData::uploadCpuDataAsync(const void* data, size_t size) {
+    if (size != 0) {
+        void* destination = static_cast<uint8_t*>(m_data) + m_usedSize;
+        checkGpuStatus(cudaMemcpyAsync(destination, data, size,
+                                       cudaMemcpyHostToDevice, m_stream));
+    }
+    m_usedSize += roundToAlignment(size);
+}
+
+void PromiseData::finishCpuUploadAsync(CpuUploadCapsule* capsule) {
+    checkGpuStatus(cudaLaunchHostFunc(m_stream, [](void* raw) {
+        delete static_cast<CpuUploadCapsule*>(raw);
+    }, capsule));
+}
+
 void PromiseData::syncGpuData() {
     if (m_event) {
         checkGpuStatus(cudaEventSynchronize(m_event));
     } else {
         checkGpuStatus(cudaStreamSynchronize(m_stream));
     }
-}
-
-void* PromiseData::pushDataArena(size_t size) {
-    size_t alignedSize = roundToAlignment(size);
-    if (alignedSize > m_size - m_usedSize) {
-        throw std::runtime_error("GPU data arena is full");
-    }
-    void* data = m_data ? static_cast<char*>(m_data) + m_usedSize : nullptr;
-    m_usedSize += alignedSize;
-    return data;
 }
 
 PromiseCapsule PromiseData::collectRawCpuCopy() {

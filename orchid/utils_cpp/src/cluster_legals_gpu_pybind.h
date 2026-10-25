@@ -10,32 +10,43 @@
 #include <memory>
 #include <cstdint>
 #include <cstring>
+#include <optional>
+#include <variant>
+#include <string>
+#include <vector>
+#include <limits>
+
+#if defined(ENABLE_GPU)
+#include "cluser_legals_gpu_kernel.h"
+#endif
 
 namespace py = pybind11;
 
 class GpuPromise;
+namespace detail { template <typename... T> class GpuSpanTemplateUtil; }
 
 // A non owning buffer of Gpu data
 class GpuBuffer {
 public:
-    void* const m_data{ nullptr };
+    void* m_data{ nullptr };
     size_t m_size{ 0 };
     std::shared_ptr<GpuPromise> m_promise{ nullptr };
 
+    GpuBuffer() = default;
     GpuBuffer(void* data, size_t size, std::shared_ptr<GpuPromise> promise);
 };
 
 // A typed span of Gpu data
 template<typename T>
-class GpuSpan {
+class GpuSpan : public GpuBuffer {
     static_assert(std::is_arithmetic<T>::value, "Template parameter T must be a primitive type.");
 
     bool m_uploaded{ 0 };
     py::array_t<T, py::array::c_style> m_cpuInformation{ };
-    std::unique_ptr<GpuBuffer> m_gpuBuffer{ };
 
-    friend class detail::GpuSpanTemplateUtil;
+    template <typename...> friend class detail::GpuSpanTemplateUtil;
 public:
+    GpuSpan() = default;
     GpuSpan(void* data, size_t size, std::shared_ptr<GpuPromise> promise);
 
     // Pybind API
@@ -44,15 +55,15 @@ public:
     // Ideally the entire pipeline is GPU until FAISS so it ought to be fine.
     py::array_t<T, py::array::c_style > collectToCpu() const;
     
-    // Gets underlying buffer, Spassuming it has already been uploaded.
-    GpuBuffer getBuffer();
+    // Gets underlying buffer, assuming it has already been uploaded.
+    const GpuBuffer& getBuffer() const;
 };
 
 // Helper function for adding GPU span
 template<typename T>
 void pymoduleAddGpuSpan(py::module_ &m) {
     std::string typeName = py::type_id<T>();
-    py::class_<GpuSpan<T>, GpuBuffer>(m, typeName + "GpuSpan")
+    py::class_<GpuSpan<T>, GpuBuffer>(m, (typeName + "GpuSpan").c_str())
         .def("collect_to_cpu", &GpuSpan<T>::collectToCpu);
 }
 
@@ -69,7 +80,7 @@ namespace detail {
             bool isSupportedSpan = false;
             size_t accumulatedSize = 0;
             ([&]{
-                if (py::isinstance<GpuSpan<T>>(item))
+                if (py::isinstance<GpuSpan<T>>(item)) {
                     GpuSpan<T>& span = item.cast<GpuSpan<T>&>();
                     isSupportedSpan = true;
 
@@ -77,30 +88,39 @@ namespace detail {
                         throw std::runtime_error("Spans cannot be reuploaded again");
                     }
 
-                    span.
-                })
+                    accumulatedSize += span.m_cpuInformation.nbytes();
+                }
+            }(), ...);
             
             if (!isSupportedSpan) {
                 throw std::runtime_error("Uploaded type is not supported");
             }
+            return accumulatedSize;
         }
 
-        // Initializes buffer data for a gpu span.
-        static void setSpanBuffer(py::handle item, GpuBuffer&& buffer) {
+        // Attaches the GPU buffer and returns its CPU upload source.
+        static py::array setSpanBuffer(py::handle item, GpuBuffer&& buffer) {
             bool successfulSet = false;
+            py::array source;
 
             // Gets a shallow copy if it already is in c style
             (..., ([&]{
                 if (!successfulSet && py::isinstance<GpuSpan<T>>(item)) {
                     GpuSpan<T>& span = item.cast<GpuSpan<T>&>();
-                    span.m_gpuBuffer = buffer;
+                    if (span.m_uploaded) {
+                        throw std::runtime_error("Spans cannot be reuploaded again");
+                    }
+                    source = std::move(span.m_cpuInformation);
+                    static_cast<GpuBuffer&>(span) = std::move(buffer);
+                    span.m_uploaded = true;
                     successfulSet = true;
                 }
             }()));
 
-            if (successfulSet) {
+            if (!successfulSet) {
                 throw std::runtime_error("Given item is not a supported span");
             }
+            return source;
         }
 
         // Gpu span initialization logic
@@ -128,14 +148,14 @@ namespace detail {
                 }()));
             }
 
-            // Deals with direct scalar conversion
-            if (!retArray.has_value()) {
-                (..., ([&]{
-                    if (py::isinstance<T>(item))
-                        retArray = py::array_t<T, py::array::c_style>({}, item.cast<T>());
-                }()));
+            // Let NumPy infer scalar dtypes, then retry the supported array checks.
+            if (!py::isinstance<py::array>(item) && PyNumber_Check(item.ptr())) {
+                py::array scalar = py::array::ensure(item);
+                if (scalar) {
+                    return formatGpuUpload(std::move(scalar));
+                }
             }
-                
+
             // If none of the attempted casts work it means that an invalid object was loaded in
             if (!retArray.has_value()) {
                 throw std::runtime_error("Uploaded type is not supported");
@@ -145,19 +165,19 @@ namespace detail {
             py::object result = py::none();
             bool hasAddedSpan = false;
             (..., ([&]{
-                if (!hasAddedSpan && py::array_t<T, py::array::c_style>* ptr = 
-                    std::get_if<py::array_t<T, py::array::c_style>>(&*retArray)) {
+                if (auto* ptr = std::get_if<py::array_t<T, py::array::c_style>>(&*retArray);
+                    !hasAddedSpan && ptr) {
 
-                    GpuSpan<T> retSpan;
+                    GpuSpan<T> retSpan{ };
                     retSpan.m_uploaded = false;
                     retSpan.m_cpuInformation = *ptr;
-                    result = py::cast(retSpan);
-                    bool hasGottenSpan = true;
+                    result = py::cast(std::move(retSpan));
+                    hasAddedSpan = true;
                 }
             }()));
 
             if (result.is_none()) {
-                throw runtime_error("Unreachable point in formatGpuUpload, should have already uploaded");
+                throw std::runtime_error("Unreachable point in formatGpuUpload, should have already uploaded");
             }
             
             return result;
@@ -168,7 +188,7 @@ namespace detail {
         static void addAllSupportedGpuSpan(py::module_ &m) {
             ([&]{
                 pymoduleAddGpuSpan<T>(m);
-            }(), ...)
+            }(), ...);
         }
     };
 
@@ -181,8 +201,9 @@ namespace detail {
 struct PromiseData;
 
 // A set of Gpu data that may or may not be in transit
-class GpuPromise {
+class GpuPromise : public std::enable_shared_from_this<GpuPromise> {
 public:
+
     // >>> C++/Cuda exclusive <<<
     std::unique_ptr<PromiseData> m_data;
 
@@ -203,11 +224,13 @@ std::shared_ptr<GpuPromise> uploadToGpu_out_py(py::args args);
 
 #if defined(ENABLE_GPU)
 
-#include "cluser_legals_gpu_kernel.h"
 #include <vector>
 static inline std::vector<PromiseData*> gatherPromises(std::vector<const GpuBuffer*> buffers) {
     std::vector<PromiseData*> ret;
     for (size_t i = 0 ; i < buffers.size() ; i += 1) {
+        if (!buffers[i]->m_promise) {
+            throw std::runtime_error("Span has not been uploaded to the GPU yet");
+        }
         PromiseData* promise = buffers[i]->m_promise->m_data.get();
         if (std::find(ret.begin(), ret.end(), promise) == ret.end()) {
             ret.push_back(promise);
@@ -219,7 +242,7 @@ inline GpuBuffer::GpuBuffer(void* data, size_t size, std::shared_ptr<GpuPromise>
     : m_data(data), m_size(size), m_promise(std::move(promise)) {}
 template <typename T>
 inline GpuSpan<T>::GpuSpan(void* data, size_t size, std::shared_ptr<GpuPromise> promise)
-    : GpuBuffer(data, size, std::move(promise)) {}
+    : GpuBuffer(data, size, std::move(promise)), m_uploaded(true) {}
 inline GpuPromise::GpuPromise(std::unique_ptr<PromiseData> data) : m_data(std::move(data)) {
     if (!m_data) {
         throw std::runtime_error("GPU kernel returned no data");
@@ -228,9 +251,9 @@ inline GpuPromise::GpuPromise(std::unique_ptr<PromiseData> data) : m_data(std::m
 template <typename T>
 py::array_t<T, py::array::c_style> GpuSpan<T>::collectToCpu() const {
     if (!m_uploaded) {
-        throw std::runtime_error("Span has not been uploaded to the CPU yet");
+        throw std::runtime_error("Span has not been uploaded to the GPU yet");
     }
-    if (m_gpuBuffer.m_data == nullptr && m_gpuBuffer.m_size != 0) {
+    if (m_data == nullptr && m_size != 0) {
         throw std::runtime_error("Span not given valid data");
     }
 
@@ -240,6 +263,9 @@ py::array_t<T, py::array::c_style> GpuSpan<T>::collectToCpu() const {
         throw std::runtime_error("Buffer size is not divisible by sizeof(T)");
     }
 
+    if (!m_promise) {
+        throw std::runtime_error("Span has no GPU promise");
+    }
     m_promise->m_data->syncGpuData();
     auto rawDataCapsule = std::make_unique<PromiseCapsule>(copyToCpu(m_data, m_size));
     void* cpuData = rawDataCapsule->ptr;
@@ -255,45 +281,88 @@ py::array_t<T, py::array::c_style> GpuSpan<T>::collectToCpu() const {
             static_cast<T*>(cpuData),
             rawData);
 }
+template <typename T>
+inline const GpuBuffer& GpuSpan<T>::getBuffer() const {
+    if (!m_uploaded) {
+        throw std::runtime_error("Span has not been uploaded to the GPU yet");
+    }
+    return *this;
+}
 inline GpuSpan<uint8_t> GpuPromise::collectBufferAsync() {
-    return GpuSpan<uint8_t>(m_gpuBuffer.m_data->m_data, m_gpuBuffer.m_data->m_size, shared_from_this());
+    return GpuSpan<uint8_t>(m_data->m_data, m_data->m_size, shared_from_this());
 }
 inline GpuSpan<uint8_t> GpuPromise::collectBufferSync() {
     m_data->syncGpuData();
     return collectBufferAsync();
 }
 inline py::object gpuPrep_out_py(py::args args) {
-    for (py::object item : args) {
-        detail::SpanUtils::formatGpuUpload(item);
+    py::tuple spans(args.size());
+    for (size_t i = 0; i < args.size(); ++i) {
+        spans[i] = detail::SpanUtil::formatGpuUpload(py::reinterpret_borrow<py::object>(args[i]));
     }
+    return std::move(spans);
 }
 inline std::shared_ptr<GpuPromise> uploadToGpu_out_py(py::args args) {
-    size_t argLength = py::len(args);
+    size_t argLength = args.size();
     std::vector<py::handle> dataHandles;
-    dataHandles.resize(argLength);
+    dataHandles.reserve(argLength);
     std::vector<size_t> dataSizes;
-    dataSize.resize(arglength);
+    dataSizes.reserve(argLength);
+    size_t cumulative_size = 0;
 
     // Ensures item sizes are properly accounted for
-    for (py::handle item : sizingData) {
+    for (py::handle item : args) {
         dataHandles.push_back(item);
         size_t itemSize = detail::SpanUtil::getSpanSizesForUpload(item);
         dataSizes.push_back(itemSize);
-        cumulative_size += roundToAlignment(itemSize);
+        const size_t maxSize = std::numeric_limits<size_t>::max();
+        size_t alignedSize = roundToAlignment(itemSize);
+        cumulative_size += alignedSize;
     }
+
+    if (cumulative_size > std::numeric_limits<size_t>::max() - (GpuAlignment - 1)) {
+        throw std::overflow_error("GPU allocation size overflow");
+    }
+
+    // Stage plain bytes so the completion callback never needs Python's GIL.
+    auto uploadCapsule = std::make_unique<CpuUploadCapsule>(cumulative_size);
 
     // Creates a block of data with needed size
     std::unique_ptr<PromiseData> promiseData = std::make_unique<PromiseData>(cumulative_size);
-    void* rawDataIter = m_data.getData();
-    std::shared_ptr<GpuPromise> promise = std::make_shared(std::move(promiseData));
+    void* rawDataIter = promiseData->m_data;
+    std::shared_ptr<GpuPromise> promise = std::make_shared<GpuPromise>(std::move(promiseData));
 
-    // Begins partitioning data along block of data
-    for (int i = 0 ; i < argLength ; i++) {
-        GpuBuffer addBuffer {rawDataIter, dataSizes[i], promise};
-        detail::SpanUtil::setSpanBuffer(dataHandles[i], addBuffer);
+    try {
+        // Begins partitioning data along block of data
+        for (size_t i = 0; i < argLength; ++i) {
+            PromiseData& data = *promise->m_data;
+            size_t alignedSize = roundToAlignment(dataSizes[i]);
+            if (data.m_usedSize > data.m_size || alignedSize > data.m_size - data.m_usedSize) {
+                throw std::runtime_error("GPU data arena is full");
+            }
+            GpuBuffer addBuffer{rawDataIter, dataSizes[i], promise};
+            py::array source = detail::SpanUtil::setSpanBuffer(dataHandles[i], std::move(addBuffer));
+            const void* uploadSource = nullptr;
+            if (dataSizes[i] != 0) {
+                uint8_t* destination = uploadCapsule->data.data() + data.m_usedSize;
+                std::memcpy(destination, source.data(), dataSizes[i]);
+                uploadSource = destination;
+            }
+            data.uploadCpuDataAsync(uploadSource, dataSizes[i]);
 
-        rawDataIter = static_cast<void*>(static_cast<uint8_t*>(rawDataIter) + roundToAlignment(dataSize));
+            if (rawDataIter != nullptr) {
+                rawDataIter = static_cast<uint8_t*>(rawDataIter) + roundToAlignment(dataSizes[i]);
+            }
+        }
+        // Orphan the capsule once its deletion has been queued after every upload.
+        promise->m_data->finishCpuUploadAsync(uploadCapsule.get());
+        uploadCapsule.release();
+    } catch (...) {
+        // Spans may retain the promise after a failure; finish copies before freeing staging.
+        promise->m_data->syncGpuData();
+        throw;
     }
+    return promise;
 }
 
 inline GpuSpan<uint8_t> predicate_results_to_bitmap_gpu_out_py (
@@ -308,8 +377,12 @@ inline GpuSpan<uint8_t> predicate_results_to_bitmap_gpu_out_py (
     // TODO: Add more checking 
     auto result = std::make_shared<GpuPromise>(predicate_results_to_bitmap_gpu_impl(
         gatherPromises({&posting_lists, &posting_sizes, &posting_queries, &dense_masks, &dense_mask_queries}),
-        posting_lists.m_data, posting_sizes.m_data, posting_queries.m_data,
-        dense_masks.m_data, dense_mask_queries.m_data, n_queries, bytes_per_query, n_docs));
+        static_cast<const uint32_t*>(posting_lists.getBuffer().m_data), 
+        static_cast<const int64_t*>(posting_sizes.getBuffer().m_data), 
+        static_cast<const int64_t*>(posting_queries.getBuffer().m_data),
+        static_cast<const uint8_t*>(dense_masks.getBuffer().m_data), 
+        static_cast<const int64_t*>(dense_mask_queries.getBuffer().m_data), 
+        n_queries, bytes_per_query, n_docs));
     return result->collectBufferAsync();
 }
 
@@ -321,11 +394,14 @@ inline GpuSpan<float> cluster_legals_preordered_packed_gpu_out_py (
     const GpuSpan<int32_t> cluster_offsets,
     const GpuSpan<int32_t> cluster_counts,
     int32_t n_list) {
-    // TODO: Add more checking 
+    
+
     auto result = std::make_shared<GpuPromise>(cluster_legals_preordered_packed_gpu_impl(
         gatherPromises({&mask_packed_buffer, &cluster_offsets, &cluster_counts}),
-        mask_packed_buffer.m_data, n_queries, bytes_per_query, n_docs,
-        cluster_offsets.m_data, cluster_counts.m_data, n_list));
+        static_cast<const uint8_t*>(mask_packed_buffer.getBuffer().m_data), n_queries, bytes_per_query, n_docs,
+        static_cast<const int32_t*>(cluster_offsets.getBuffer().m_data), 
+        static_cast<const int32_t*>(cluster_counts.getBuffer().m_data), 
+        n_list));
     return GpuSpan<float>(result->m_data->m_data, result->m_data->m_size, result);
 }
 
@@ -338,24 +414,15 @@ struct PromiseData { };
 inline GpuBuffer::GpuBuffer(void* data, size_t size, std::shared_ptr<GpuPromise> promise) {
     throw std::runtime_error("GPU backend not compiled");
 }
-template <typename T>
-inline GpuSpan<T>::GpuSpan(void* data, size_t size, std::shared_ptr<GpuPromise> promise) : GpuBuffer(data, size, promise) {
-    throw std::runtime_error("GPU backend not compiled");
-}
 inline GpuPromise::GpuPromise(std::unique_ptr<PromiseData> data) {
     throw std::runtime_error("GPU backend not compiled");
 }
-inline GpuPromise::GpuPromise(py::args sizingData) {
-    throw std::runtime_error("GPU backend not compiled");
-}
-template <typename T>
-inline GpuSpan<T>::setGpuBuffer()
 template <typename T>
 inline py::array_t<T, py::array::c_style> GpuSpan<T>::collectToCpu() const {
     throw std::runtime_error("GPU backend not compiled");
 }
 template <typename T>
-inline const GpuBuffer GpuSpan<T>::getBuffer() {
+inline const GpuBuffer& GpuSpan<T>::getBuffer() const {
     throw std::runtime_error("GPU backend not compiled");
 }
 inline GpuSpan<uint8_t> GpuPromise::collectBufferAsync() {
@@ -364,10 +431,10 @@ inline GpuSpan<uint8_t> GpuPromise::collectBufferAsync() {
 inline GpuSpan<uint8_t> GpuPromise::collectBufferSync() {
     throw std::runtime_error("GPU backend not compiled");
 }
-inline py::object gpuPrep_out_py() {
+inline py::object gpuPrep_out_py(py::args args) {
     throw std::runtime_error("GPU backend not compiled");
 }
-inline GpuPromise uploadToGpu_out_py(py::args args) {
+inline std::shared_ptr<GpuPromise> uploadToGpu_out_py(py::args args) {
     throw std::runtime_error("GPU backend not compiled");
 }
 
@@ -402,5 +469,11 @@ inline void addGpuModule(py::module_ &m) {
         .def_readonly("size", &GpuBuffer::m_size)
         .def_readonly("promise", &GpuBuffer::m_promise);
 
+    py::class_<GpuPromise, std::shared_ptr<GpuPromise>>(m, "GpuPromise")
+        .def("collect_buffer_async", &GpuPromise::collectBufferAsync)
+        .def("collect_buffer_sync", &GpuPromise::collectBufferSync);
     detail::SpanUtil::addAllSupportedGpuSpan(m);
+    pymoduleAddGpuSpan<float>(m);
+    m.def("gpu_prep", &gpuPrep_out_py);
+    m.def("upload_to_gpu", &uploadToGpu_out_py);
 }
