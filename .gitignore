@@ -24,3 +24,4 @@ dist/
 *.index
 *.cagra
 *.DS_Store
+/.local-smoke/
