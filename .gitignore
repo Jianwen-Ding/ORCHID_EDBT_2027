@@ -23,3 +23,4 @@ dist/
 *.npy
 *.index
 *.cagra
+*.DS_Store
