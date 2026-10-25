@@ -8,6 +8,8 @@ from . import _cluster_legals as _impl
 
 prepare_cluster_order = _impl.prepare_cluster_order
 reorder_mask = _impl.reorder_mask
+gpu_prep = _impl.gpu_prep
+upload_to_gpu = _impl.upload_to_gpu
 
 
 def topk_small(
@@ -162,6 +164,8 @@ def evaluate_predicate_conjunctions(
 
 
 __all__ = [
+    "gpu_prep",
+    "upload_to_gpu",
     "topk_small",
     "cluster_legals",
     "evaluate_predicate_conjunctions",
