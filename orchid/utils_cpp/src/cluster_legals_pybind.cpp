@@ -539,7 +539,9 @@ PYBIND11_MODULE(_cluster_legals, m) {
   //   .def_readonly("size", &GpuSpan<float>::m_size);
 
   m.doc() = "Cluster legals kernel (preordered packed)";
-  addGpuModule(m);
+
+  auto gpu = m.def_submodule("gpu");
+  addGpuModule(gpu);
 
   m.def("prepare_cluster_order", &prepare_cluster_order_py,
         py::arg("doc_cluster"), py::arg("n_list"));

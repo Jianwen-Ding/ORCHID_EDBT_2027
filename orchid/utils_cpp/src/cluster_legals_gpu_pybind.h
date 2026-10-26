@@ -15,6 +15,7 @@
 #include <string>
 #include <vector>
 #include <limits>
+#include <utility>
 
 #if defined(ENABLE_GPU)
 #include "cluser_legals_gpu_kernel.h"
@@ -59,18 +60,34 @@ public:
     const GpuBuffer& getBuffer() const;
 };
 
-// Helper function for adding GPU span
-template<typename T>
-void pymoduleAddGpuSpan(py::module_ &m) {
-    std::string typeName = py::type_id<T>();
-    py::class_<GpuSpan<T>, GpuBuffer>(m, (typeName + "GpuSpan").c_str())
-        .def("collect_to_cpu", &GpuSpan<T>::collectToCpu);
-}
 
 namespace detail {
+    // Helper function for adding GPU span
+    template<typename T>
+    void pymoduleAddGpuSpan(py::module_ &m, const std::string& name) {
+        py::class_<GpuSpan<T>, GpuBuffer>(m, (name + "_gpu_span").c_str())
+            .def("collect_to_cpu", &GpuSpan<T>::collectToCpu);
+    }
+
+    // Structural string type for C++20 non-type template parameters.
+    template <std::size_t N>
+    struct FixedString {
+        char value[N];
+
+        constexpr FixedString(const char (&text)[N]) {
+            std::copy_n(text, N, value);
+        }
+    };
+
+    template <typename T, FixedString Name>
+    struct NamedType {
+        using type = T;
+        static constexpr auto name = Name;
+    };
+
     // Since GpuSpan is a templated type, this util allows
     // a limited amount of templates to be sent to pybind.
-    template <typename... T>
+    template <typename... Entries>
     class GpuSpanTemplateUtil {    
     public:
         // Gpu span upload information
@@ -80,8 +97,8 @@ namespace detail {
             bool isSupportedSpan = false;
             size_t accumulatedSize = 0;
             ([&]{
-                if (py::isinstance<GpuSpan<T>>(item)) {
-                    GpuSpan<T>& span = item.cast<GpuSpan<T>&>();
+                if (py::isinstance<GpuSpan<typename Entries::type>>(item)) {
+                    GpuSpan<typename Entries::type>& span = item.cast<GpuSpan<typename Entries::type>&>();
                     isSupportedSpan = true;
 
                     if (span.m_uploaded) {
@@ -105,8 +122,8 @@ namespace detail {
 
             // Gets a shallow copy if it already is in c style
             (..., ([&]{
-                if (!successfulSet && py::isinstance<GpuSpan<T>>(item)) {
-                    GpuSpan<T>& span = item.cast<GpuSpan<T>&>();
+                if (!successfulSet && py::isinstance<GpuSpan<typename Entries::type>>(item)) {
+                    GpuSpan<typename Entries::type>& span = item.cast<GpuSpan<typename Entries::type>&>();
                     if (span.m_uploaded) {
                         throw std::runtime_error("Spans cannot be reuploaded again");
                     }
@@ -127,15 +144,15 @@ namespace detail {
 
         // Formats object to be uploaded to gpu
         static py::object formatGpuUpload(py::object item) {
-            std::optional<std::variant<py::array_t<T, py::array::c_style>...>> retArray;
+            std::optional<std::variant<py::array_t<typename Entries::type, py::array::c_style>...>> retArray;
 
             // Gets a shallow copy if it already is in c style
             (..., ([&]{
-                if (py::isinstance<py::array_t<T>>(item)) {
+                if (py::isinstance<py::array_t<typename Entries::type>>(item)) {
                     py::array arr = py::reinterpret_borrow<py::array>(item);
                     if (arr.flags() & py::array::c_style) {
 
-                        retArray = py::reinterpret_borrow<py::array_t<T, py::array::c_style>>(item);
+                        retArray = py::reinterpret_borrow<py::array_t<typename Entries::type, py::array::c_style>>(item);
                     }
                 }
             }()));
@@ -143,8 +160,8 @@ namespace detail {
             // Casts and causes a deep copy if non c style 
             if (!retArray.has_value()) {
                 (..., ([&]{
-                    if (py::isinstance<py::array_t<T>>(item))
-                        retArray = item.cast<py::array_t<T, py::array::c_style>>();
+                    if (py::isinstance<py::array_t<typename Entries::type>>(item))
+                        retArray = item.cast<py::array_t<typename Entries::type, py::array::c_style>>();
                 }()));
             }
 
@@ -165,10 +182,10 @@ namespace detail {
             py::object result = py::none();
             bool hasAddedSpan = false;
             (..., ([&]{
-                if (auto* ptr = std::get_if<py::array_t<T, py::array::c_style>>(&*retArray);
+                if (auto* ptr = std::get_if<py::array_t<typename Entries::type, py::array::c_style>>(&*retArray);
                     !hasAddedSpan && ptr) {
 
-                    GpuSpan<T> retSpan{ };
+                    GpuSpan<typename Entries::type> retSpan{ };
                     retSpan.m_uploaded = false;
                     retSpan.m_cpuInformation = *ptr;
                     result = py::cast(std::move(retSpan));
@@ -187,13 +204,52 @@ namespace detail {
 
         static void addAllSupportedGpuSpan(py::module_ &m) {
             ([&]{
-                pymoduleAddGpuSpan<T>(m);
+                pymoduleAddGpuSpan<typename Entries::type>(m, Entries::name.value);
             }(), ...);
         }
     };
 
-    typedef GpuSpanTemplateUtil
-        <uint8_t,uint32_t, int32_t, int64_t> SpanUtil;
+    // Extract a type's written name from the macro's stringified argument list.
+    template <FixedString Names, std::size_t Index>
+    constexpr auto gpuSpanTypeName() {
+        std::size_t begin = 0;
+        for (std::size_t i = 0; i < Index; ++i) {
+            while (Names.value[begin] != ',' && Names.value[begin] != '\0') ++begin;
+            if (Names.value[begin] == ',') ++begin;
+        }
+        const auto isSpace = [](char c) {
+            return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+        };
+        while (isSpace(Names.value[begin])) ++begin;
+        std::size_t end = begin;
+        while (Names.value[end] != ',' && Names.value[end] != '\0') ++end;
+        while (end > begin && isSpace(Names.value[end - 1])) --end;
+
+        auto name = Names;
+        std::fill_n(name.value, sizeof(name.value), '\0');
+        std::copy_n(Names.value + begin, end - begin, name.value);
+        return name;
+    }
+
+    template <FixedString Names, typename... Types>
+    struct GpuSpanTypes {
+        template <std::size_t... Indices>
+        static auto make(std::index_sequence<Indices...>)
+            -> GpuSpanTemplateUtil<NamedType<Types, gpuSpanTypeName<Names, Indices>()>...>;
+
+        using type = decltype(make(std::index_sequence_for<Types...>{}));
+    };
+
+    // Preserve the spelling of each type, including typedefs, as its Python name.
+    // Example: using u8 = uint8_t; ORCHID_GPU_SPAN_UTIL(MySpans, u8, int32_t);
+    #define ORCHID_GPU_SPAN_UTIL(Alias, ...) \
+        typedef typename ::detail::GpuSpanTypes<#__VA_ARGS__, __VA_ARGS__>::type Alias
+
+    using byte = uint8_t;
+    using u32 = uint32_t;
+    using i32 = int32_t;
+    using i64 = int64_t;
+    ORCHID_GPU_SPAN_UTIL(SpanUtil, byte, u32, i32, i64, float);
 }
 
 
@@ -473,7 +529,6 @@ inline void addGpuModule(py::module_ &m) {
         .def("collect_buffer_async", &GpuPromise::collectBufferAsync)
         .def("collect_buffer_sync", &GpuPromise::collectBufferSync);
     detail::SpanUtil::addAllSupportedGpuSpan(m);
-    pymoduleAddGpuSpan<float>(m);
     m.def("gpu_prep", &gpuPrep_out_py);
     m.def("upload_to_gpu", &uploadToGpu_out_py);
 }
