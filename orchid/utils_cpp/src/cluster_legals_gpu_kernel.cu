@@ -32,12 +32,6 @@ void PromiseData::uploadCpuDataAsync(const void* data, size_t size) {
     m_usedSize += roundToAlignment(size);
 }
 
-void PromiseData::finishCpuUploadAsync(CpuUploadCapsule* capsule) {
-    checkGpuStatus(cudaLaunchHostFunc(m_stream, [](void* raw) {
-        delete static_cast<CpuUploadCapsule*>(raw);
-    }, capsule));
-}
-
 void PromiseData::syncGpuData() {
     if (m_event) {
         checkGpuStatus(cudaEventSynchronize(m_event));
@@ -63,7 +57,7 @@ PromiseCapsule copyToCpu(const void* gpuData, size_t size) {
 }
 
 
-std::shared_ptr<PromiseData> predicate_results_to_bitmap_gpu_impl (
+std::unique_ptr<PromiseData> predicate_results_to_bitmap_gpu_impl (
     std::vector<PromiseData*> blockingPromises,
     const uint32_t* posting_lists,
     const int64_t* posting_sizes,
@@ -77,7 +71,7 @@ std::shared_ptr<PromiseData> predicate_results_to_bitmap_gpu_impl (
 }
 
 
-std::shared_ptr<PromiseData> cluster_legals_preordered_packed_gpu_impl (
+std::unique_ptr<PromiseData> cluster_legals_preordered_packed_gpu_impl (
     std::vector<PromiseData*> blockingPromises,
     const uint8_t* mask_packed_buffer,
     int32_t n_queries,

@@ -256,9 +256,18 @@ namespace detail {
 // Hidden implementation of Gpu Data
 struct PromiseData;
 
+// Retains the original arrays; no additional host buffer is allocated.
+struct CpuUploadCapsule {
+    std::vector<py::array> sources;
+};
+
 // A set of Gpu data that may or may not be in transit
 class GpuPromise : public std::enable_shared_from_this<GpuPromise> {
 public:
+
+    // Member order matters: m_data is destroyed first, synchronizing its stream
+    // before the Python array references are released on the owning thread.
+    CpuUploadCapsule m_uploadSources;
 
     // >>> C++/Cuda exclusive <<<
     std::unique_ptr<PromiseData> m_data;
@@ -380,13 +389,11 @@ inline std::shared_ptr<GpuPromise> uploadToGpu_out_py(py::args args) {
         throw std::overflow_error("GPU allocation size overflow");
     }
 
-    // Stage plain bytes so the completion callback never needs Python's GIL.
-    auto uploadCapsule = std::make_unique<CpuUploadCapsule>(cumulative_size);
-
     // Creates a block of data with needed size
     std::unique_ptr<PromiseData> promiseData = std::make_unique<PromiseData>(cumulative_size);
     void* rawDataIter = promiseData->m_data;
     std::shared_ptr<GpuPromise> promise = std::make_shared<GpuPromise>(std::move(promiseData));
+    promise->m_uploadSources.sources.reserve(argLength);
 
     try {
         // Begins partitioning data along block of data
@@ -398,23 +405,17 @@ inline std::shared_ptr<GpuPromise> uploadToGpu_out_py(py::args args) {
             }
             GpuBuffer addBuffer{rawDataIter, dataSizes[i], promise};
             py::array source = detail::SpanUtil::setSpanBuffer(dataHandles[i], std::move(addBuffer));
-            const void* uploadSource = nullptr;
-            if (dataSizes[i] != 0) {
-                uint8_t* destination = uploadCapsule->data.data() + data.m_usedSize;
-                std::memcpy(destination, source.data(), dataSizes[i]);
-                uploadSource = destination;
-            }
-            data.uploadCpuDataAsync(uploadSource, dataSizes[i]);
+            // Hold the NumPy owner until the promise is destroyed. Do not mutate
+            // the source array while its upload is in flight.
+            promise->m_uploadSources.sources.push_back(std::move(source));
+            data.uploadCpuDataAsync(promise->m_uploadSources.sources.back().data(), dataSizes[i]);
 
             if (rawDataIter != nullptr) {
                 rawDataIter = static_cast<uint8_t*>(rawDataIter) + roundToAlignment(dataSizes[i]);
             }
         }
-        // Orphan the capsule once its deletion has been queued after every upload.
-        promise->m_data->finishCpuUploadAsync(uploadCapsule.get());
-        uploadCapsule.release();
     } catch (...) {
-        // Spans may retain the promise after a failure; finish copies before freeing staging.
+        // Spans may retain the promise after a failure; finish pending uploads.
         promise->m_data->syncGpuData();
         throw;
     }

@@ -30,13 +30,6 @@ struct PromiseCapsule {
     std::function<void(void*)> free;
 };
 
-// Owns staging bytes without Python references or CUDA resources.
-struct CpuUploadCapsule {
-    std::vector<uint8_t> data;
-
-    explicit CpuUploadCapsule(size_t size) : data(size) {}
-};
-
 struct PromiseData {
     void* m_data = nullptr;
     size_t m_size = 0;
@@ -50,15 +43,13 @@ struct PromiseData {
     const void* getData() const;
     // Appends an aligned upload. Caller checks capacity and retains the source until sync.
     void uploadCpuDataAsync(const void* data, size_t size);
-    // Takes ownership on success; deletes the capsule after preceding stream work.
-    void finishCpuUploadAsync(CpuUploadCapsule* capsule);
     void syncGpuData();
     PromiseCapsule collectRawCpuCopy();
 };
 
 PromiseCapsule copyToCpu(const void* gpuData, size_t size);
 
-std::shared_ptr<PromiseData> predicate_results_to_bitmap_gpu_impl (
+std::unique_ptr<PromiseData> predicate_results_to_bitmap_gpu_impl (
     std::vector<PromiseData*> blockingPromises,
     const uint32_t* posting_lists,
     const int64_t* posting_sizes,
@@ -70,7 +61,7 @@ std::shared_ptr<PromiseData> predicate_results_to_bitmap_gpu_impl (
     int32_t n_docs);
 
 
-std::shared_ptr<PromiseData> cluster_legals_preordered_packed_gpu_impl (
+std::unique_ptr<PromiseData> cluster_legals_preordered_packed_gpu_impl (
     std::vector<PromiseData*> blockingPromises,
     const uint8_t* mask_packed_buffer,
     int32_t n_queries,
