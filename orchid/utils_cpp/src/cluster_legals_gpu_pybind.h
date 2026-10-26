@@ -310,7 +310,7 @@ public:
 
 // Prepares a buffer of numberic values to be uploaded to the gpu
 // Doesn't upload the buffer just yet prepares data to be uploaded
-py::object gpuPrep_out_py(py::args args);
+py::object gpuPrep_out_py(py::object item);
 
 // Actually collects the buffers to be sent together in a single GPU promise.
 std::shared_ptr<GpuPromise> uploadToGpu_out_py(py::args args);
@@ -388,13 +388,10 @@ inline GpuSpan<uint8_t> GpuPromise::collectBufferSync() {
     m_data->syncGpuData();
     return collectBufferAsync();
 }
-inline py::object gpuPrep_out_py(py::args args) {
-    py::tuple spans(args.size());
-    for (size_t i = 0; i < args.size(); ++i) {
-        spans[i] = detail::SpanUtil::formatGpuUpload(py::reinterpret_borrow<py::object>(args[i]));
-    }
-    return std::move(spans);
+inline py::object gpuPrep_out_py(py::object item) {
+    return detail::SpanUtil::formatGpuUpload(std::move(item));
 }
+
 inline std::shared_ptr<GpuPromise> uploadToGpu_out_py(py::args args) {
     size_t argLength = args.size();
     std::vector<py::handle> dataHandles;
@@ -469,9 +466,42 @@ inline GpuSpan<uint8_t> predicate_results_to_bitmap_gpu_out_py (
     const GpuSpan<uint8_t> dense_masks,
     const GpuSpan<int64_t> dense_mask_queries,
     int32_t n_queries,
-    int32_t bytes_per_query,
     int32_t n_docs) {
-    // TODO: Add more checking 
+    if (n_queries < 0) throw py::value_error("n_queries must be nonnegative");
+    if (n_docs <= 0) throw py::value_error("n_docs must be positive");
+    const int32_t bytes_per_query = n_docs / 8 + (n_docs % 8 != 0);
+
+    // Span sizes are in bytes. Check metadata without downloading GPU contents.
+    const auto elementCount = [](const auto& span, size_t elementSize, const char* name) {
+        const auto& buffer = span.getBuffer();
+        if (!buffer.m_promise || (buffer.m_size != 0 && buffer.m_data == nullptr)) {
+            throw py::value_error(std::string(name) + " must have a valid uploaded buffer");
+        }
+        if (buffer.m_size % elementSize != 0) {
+            throw py::value_error(std::string(name) + " byte size is not divisible by its element size");
+        }
+        return buffer.m_size / elementSize;
+    };
+    const size_t posting_count = elementCount(posting_lists, sizeof(uint32_t), "posting_lists");
+    const size_t size_count = elementCount(posting_sizes, sizeof(int64_t), "posting_sizes");
+    const size_t posting_query_count = elementCount(posting_queries, sizeof(int64_t), "posting_queries");
+    const size_t mask_bytes = elementCount(dense_masks, sizeof(uint8_t), "dense_masks");
+    const size_t mask_query_count = elementCount(dense_mask_queries, sizeof(int64_t), "dense_mask_queries");
+    if (size_count != posting_query_count) {
+        throw py::value_error("posting_sizes and posting_queries must have the same number of elements");
+    }
+    const size_t query_count = static_cast<size_t>(n_queries);
+    if (posting_query_count > query_count || mask_query_count != query_count - posting_query_count) {
+        throw py::value_error("posting_queries and dense_mask_queries must total n_queries elements");
+    }
+    if (posting_query_count == 0 && posting_count != 0) {
+        throw py::value_error("posting_lists must be empty when there are no posting queries");
+    }
+    const size_t width = static_cast<size_t>(bytes_per_query);
+    if (mask_query_count > std::numeric_limits<size_t>::max() / width ||
+        mask_bytes != mask_query_count * width) {
+        throw py::value_error("dense_masks must contain ceil(n_docs / 8) bytes per dense query");
+    }
     auto result = std::make_shared<GpuPromise>(predicate_results_to_bitmap_gpu_impl(
         gatherPromises({&posting_lists, &posting_sizes, &posting_queries, &dense_masks, &dense_mask_queries}),
         static_cast<const uint32_t*>(posting_lists.getBuffer().m_data), 
@@ -528,7 +558,7 @@ inline GpuSpan<uint8_t> GpuPromise::collectBufferAsync() {
 inline GpuSpan<uint8_t> GpuPromise::collectBufferSync() {
     throw std::runtime_error("GPU backend not compiled");
 }
-inline py::object gpuPrep_out_py(py::args args) {
+inline py::object gpuPrep_out_py(py::object item) {
     throw std::runtime_error("GPU backend not compiled");
 }
 inline std::shared_ptr<GpuPromise> uploadToGpu_out_py(py::args args) {
@@ -542,7 +572,6 @@ inline GpuSpan<uint8_t> predicate_results_to_bitmap_gpu_out_py (
     const GpuSpan<uint8_t> dense_masks,
     const GpuSpan<int64_t> mask_queries,
     int32_t n_queries,
-    int32_t bytes_per_query,
     int32_t n_docs) {
     throw std::runtime_error("GPU backend not compiled");
 }
@@ -570,6 +599,10 @@ inline void addGpuModule(py::module_ &m) {
         .def("collect_buffer_async", &GpuPromise::collectBufferAsync)
         .def("collect_buffer_sync", &GpuPromise::collectBufferSync);
     detail::SpanUtil::addAllSupportedGpuSpan(m);
-    m.def("gpu_prep", &gpuPrep_out_py);
+    m.def("gpu_prep", &gpuPrep_out_py, py::arg("item"));
     m.def("upload_to_gpu", &uploadToGpu_out_py);
+    m.def("predicate_results_to_bitmap", &predicate_results_to_bitmap_gpu_out_py,
+          py::arg("posting_lists"), py::arg("posting_sizes"), py::arg("posting_queries"),
+          py::arg("dense_masks"), py::arg("dense_mask_queries"),
+          py::arg("n_queries"), py::arg("n_docs"));
 }

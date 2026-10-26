@@ -502,7 +502,9 @@ def main():
                 stage_start = perf_counter()
                 # Create GPU Alternative here (Id -> Bitmap )
                 if use_gpu:
-                    mi = materialize_results
+                    mi = materialize_results_gpu(predicate_results, n, predicate_bitmap[:size])
+                    mi = mi.collect_to_cpu().reshape(size, (n + 7) // 8)
+                    predicate_bitmap = mi
                 else:
                     mi = materialize_results(
                         predicate_results, n, predicate_bitmap[:size], threads=0

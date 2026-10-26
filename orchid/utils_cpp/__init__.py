@@ -5,6 +5,9 @@ project directory itself is on `sys.path`.
 """
 
 from .utils_cpp import (
+    gpu,
+    gpu_prep,
+    upload_to_gpu,
     cluster_legals,
     evaluate_predicate_conjunctions,
     ids_to_bitmap,
@@ -17,6 +20,9 @@ from .utils_cpp import (
 )
 
 __all__ = [
+    "gpu",
+    "gpu_prep",
+    "upload_to_gpu",
     "topk_small",
     "cluster_legals",
     "evaluate_predicate_conjunctions",
