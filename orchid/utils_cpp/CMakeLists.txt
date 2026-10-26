@@ -9,7 +9,7 @@ execute_process(COMMAND "${Python_EXECUTABLE}" -m pybind11 --cmakedir
 find_package(pybind11 CONFIG REQUIRED HINTS "${pybind11_cmake_dir}")
 
 pybind11_add_module(_cluster_legals MODULE src/cluster_legals_pybind.cpp)
-target_compile_features(_cluster_legals PRIVATE cxx_std_17)
+target_compile_features(_cluster_legals PRIVATE cxx_std_20)
 if(MSVC)
     target_compile_options(_cluster_legals PRIVATE /O2)
 else()

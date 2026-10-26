@@ -15,6 +15,7 @@ from typing import Literal
 
 import numpy as np
 from utils_cpp import (
+    gpu,
     evaluate_predicate_conjunctions,
     predicate_results_to_bitmap,
     predicate_results_to_mask,
@@ -385,6 +386,16 @@ class SortedRangeIndex:
         )
         return cls(metadata["n_docs"], values, document_ids)
 
+
+def materialize_results_gpu(
+    results: list[PredicateResult],
+    n_docs: int,
+    out: np.ndarray,
+    *,
+    threads: int = 0,
+    ) -> byte_gpu_span:
+    """Materialize postings or existing bitmasks into a gpu span"""
+    
 
 def materialize_results(
     results: list[PredicateResult],

@@ -24,4 +24,10 @@ dist/
 *.index
 *.cagra
 *.DS_Store
+*.helper
+/.helper-logs/
 /.local-smoke/
+/scripts/helper.py
+/scripts/test_helper.py
+/.helper-src/
+/.helper-build/

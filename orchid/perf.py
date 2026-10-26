@@ -501,9 +501,12 @@ def main():
 
                 stage_start = perf_counter()
                 # Create GPU Alternative here (Id -> Bitmap )
-                mi = materialize_results(
-                    predicate_results, n, predicate_bitmap[:size], threads=0
-                )
+                if use_gpu:
+                    mi = materialize_results
+                else:
+                    mi = materialize_results(
+                        predicate_results, n, predicate_bitmap[:size], threads=0
+                    )
                 mask_materialize_time = perf_counter() - stage_start
 
                 if not args.val_flat:
