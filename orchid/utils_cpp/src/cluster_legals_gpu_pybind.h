@@ -8,10 +8,10 @@
 #include <stdexcept> 
 #include <cmath>
 #include <memory>
-#include <cstdint>
-#include <cstring>
 #include <optional>
 #include <variant>
+#include <cstdint>
+#include <cstring>
 #include <string>
 #include <vector>
 #include <limits>
@@ -43,7 +43,7 @@ class GpuSpan : public GpuBuffer {
     static_assert(std::is_arithmetic<T>::value, "Template parameter T must be a primitive type.");
 
     bool m_uploaded{ 0 };
-    py::array_t<T, py::array::c_style> m_cpuInformation{ };
+    std::vector<py::array_t<T, py::array::c_style>> m_cpuInformation;
 
     template <typename...> friend class detail::GpuSpanTemplateUtil;
 public:
@@ -54,7 +54,8 @@ public:
     
     // This is a hard cpu/gpu sync which may not be the most efficent
     // Ideally the entire pipeline is GPU until FAISS so it ought to be fine.
-    py::array_t<T, py::array::c_style > collectToCpu() const;
+    // Multiple source vectors are coalesced and collected as one flat array.
+    py::array_t<T, py::array::c_style> collectToCpu() const;
     
     // Gets underlying buffer, assuming it has already been uploaded.
     const GpuBuffer& getBuffer() const;
@@ -105,7 +106,13 @@ namespace detail {
                         throw std::runtime_error("Spans cannot be reuploaded again");
                     }
 
-                    accumulatedSize += span.m_cpuInformation.nbytes();
+                    for (const auto& source : span.m_cpuInformation) {
+                        const size_t bytes = static_cast<size_t>(source.nbytes());
+                        if (bytes > std::numeric_limits<size_t>::max() - accumulatedSize) {
+                            throw std::overflow_error("GPU span size overflow");
+                        }
+                        accumulatedSize += bytes;
+                    }
                 }
             }(), ...);
             
@@ -115,10 +122,10 @@ namespace detail {
             return accumulatedSize;
         }
 
-        // Attaches the GPU buffer and returns its CPU upload source.
-        static py::array setSpanBuffer(py::handle item, GpuBuffer&& buffer) {
+        // Attaches the GPU buffer and returns its CPU upload sources.
+        static std::vector<py::array> setSpanBuffer(py::handle item, GpuBuffer&& buffer) {
             bool successfulSet = false;
-            py::array source;
+            std::vector<py::array> sources;
 
             // Gets a shallow copy if it already is in c style
             (..., ([&]{
@@ -127,7 +134,11 @@ namespace detail {
                     if (span.m_uploaded) {
                         throw std::runtime_error("Spans cannot be reuploaded again");
                     }
-                    source = std::move(span.m_cpuInformation);
+                    sources.reserve(span.m_cpuInformation.size());
+                    for (auto& source : span.m_cpuInformation) {
+                        sources.push_back(std::move(source));
+                    }
+                    span.m_cpuInformation.clear();
                     static_cast<GpuBuffer&>(span) = std::move(buffer);
                     span.m_uploaded = true;
                     successfulSet = true;
@@ -137,57 +148,74 @@ namespace detail {
             if (!successfulSet) {
                 throw std::runtime_error("Given item is not a supported span");
             }
-            return source;
+            return sources;
         }
 
         // Gpu span initialization logic
 
         // Formats object to be uploaded to gpu
         static py::object formatGpuUpload(py::object item) {
-            std::optional<std::variant<py::array_t<typename Entries::type, py::array::c_style>...>> retArray;
+            py::list items;
+            if (py::isinstance<py::list>(item) || py::isinstance<py::tuple>(item)) {
+                items = py::list(item);
+            } else {
+                items.append(item);
+            }
+            if (items.empty()) {
+                throw std::runtime_error("Cannot infer an empty list's dtype; use a typed NumPy array");
+            }
 
-            // Gets a shallow copy if it already is in c style
-            (..., ([&]{
-                if (py::isinstance<py::array_t<typename Entries::type>>(item)) {
-                    py::array arr = py::reinterpret_borrow<py::array>(item);
-                    if (arr.flags() & py::array::c_style) {
-
-                        retArray = py::reinterpret_borrow<py::array_t<typename Entries::type, py::array::c_style>>(item);
-                    }
+            using Array = std::variant<py::array_t<typename Entries::type, py::array::c_style>...>;
+            std::vector<Array> arrays;
+            arrays.reserve(items.size());
+            for (py::handle value : items) {
+                py::object item = py::reinterpret_borrow<py::object>(value);
+                // Let NumPy infer scalar/vector dtypes before the supported array checks.
+                if (!py::isinstance<py::array>(item)) {
+                    py::array array = py::array::ensure(item);
+                    if (array) item = std::move(array);
                 }
-            }()));
+                std::optional<Array> retArray;
 
-            // Casts and causes a deep copy if non c style 
-            if (!retArray.has_value()) {
+                // Gets a shallow copy if it already is in c style
                 (..., ([&]{
-                    if (py::isinstance<py::array_t<typename Entries::type>>(item))
-                        retArray = item.cast<py::array_t<typename Entries::type, py::array::c_style>>();
+                    if (py::isinstance<py::array_t<typename Entries::type>>(item)) {
+                        py::array arr = py::reinterpret_borrow<py::array>(item);
+                        if (arr.flags() & py::array::c_style) {
+                            retArray = py::reinterpret_borrow<py::array_t<typename Entries::type, py::array::c_style>>(item);
+                        }
+                    }
                 }()));
-            }
 
-            // Let NumPy infer scalar dtypes, then retry the supported array checks.
-            if (!py::isinstance<py::array>(item) && PyNumber_Check(item.ptr())) {
-                py::array scalar = py::array::ensure(item);
-                if (scalar) {
-                    return formatGpuUpload(std::move(scalar));
+                // Casts and causes a deep copy if non c style
+                if (!retArray.has_value()) {
+                    (..., ([&]{
+                        if (py::isinstance<py::array_t<typename Entries::type>>(item))
+                            retArray = item.cast<py::array_t<typename Entries::type, py::array::c_style>>();
+                    }()));
                 }
-            }
-
-            // If none of the attempted casts work it means that an invalid object was loaded in
-            if (!retArray.has_value()) {
-                throw std::runtime_error("Uploaded type is not supported");
+                if (!retArray.has_value()) {
+                    throw std::runtime_error("Uploaded type is not supported");
+                }
+                arrays.push_back(std::move(*retArray));
             }
 
             // Extract a corresponding span from the cpu data type
             py::object result = py::none();
             bool hasAddedSpan = false;
             (..., ([&]{
-                if (auto* ptr = std::get_if<py::array_t<typename Entries::type, py::array::c_style>>(&*retArray);
-                    !hasAddedSpan && ptr) {
-
+                using CpuArray = py::array_t<typename Entries::type, py::array::c_style>;
+                if (!hasAddedSpan && std::get_if<CpuArray>(&arrays.front())) {
                     GpuSpan<typename Entries::type> retSpan{ };
                     retSpan.m_uploaded = false;
-                    retSpan.m_cpuInformation = *ptr;
+                    retSpan.m_cpuInformation.reserve(arrays.size());
+                    for (auto& array : arrays) {
+                        auto* ptr = std::get_if<CpuArray>(&array);
+                        if (!ptr) {
+                            throw std::runtime_error("All vectors in a GPU span must have the same dtype");
+                        }
+                        retSpan.m_cpuInformation.push_back(std::move(*ptr));
+                    }
                     result = py::cast(std::move(retSpan));
                     hasAddedSpan = true;
                 }
@@ -381,7 +409,13 @@ inline std::shared_ptr<GpuPromise> uploadToGpu_out_py(py::args args) {
         size_t itemSize = detail::SpanUtil::getSpanSizesForUpload(item);
         dataSizes.push_back(itemSize);
         const size_t maxSize = std::numeric_limits<size_t>::max();
+        if (itemSize > maxSize - (GpuAlignment - 1)) {
+            throw std::overflow_error("GPU span size overflow");
+        }
         size_t alignedSize = roundToAlignment(itemSize);
+        if (alignedSize > maxSize - cumulative_size) {
+            throw std::overflow_error("GPU allocation size overflow");
+        }
         cumulative_size += alignedSize;
     }
 
@@ -404,11 +438,17 @@ inline std::shared_ptr<GpuPromise> uploadToGpu_out_py(py::args args) {
                 throw std::runtime_error("GPU data arena is full");
             }
             GpuBuffer addBuffer{rawDataIter, dataSizes[i], promise};
-            py::array source = detail::SpanUtil::setSpanBuffer(dataHandles[i], std::move(addBuffer));
-            // Hold the NumPy owner until the promise is destroyed. Do not mutate
-            // the source array while its upload is in flight.
-            promise->m_uploadSources.sources.push_back(std::move(source));
-            data.uploadCpuDataAsync(promise->m_uploadSources.sources.back().data(), dataSizes[i]);
+            auto sources = detail::SpanUtil::setSpanBuffer(dataHandles[i], std::move(addBuffer));
+            size_t offset = data.m_usedSize;
+            for (auto& source : sources) {
+                // Retain each owner and upload directly, without CPU concatenation.
+                // Source arrays must remain unchanged until upload completion.
+                const size_t bytes = static_cast<size_t>(source.nbytes());
+                promise->m_uploadSources.sources.push_back(std::move(source));
+                data.uploadCpuDataAsync(promise->m_uploadSources.sources.back().data(), bytes, offset);
+                offset += bytes;
+            }
+            data.m_usedSize += alignedSize;
 
             if (rawDataIter != nullptr) {
                 rawDataIter = static_cast<uint8_t*>(rawDataIter) + roundToAlignment(dataSizes[i]);

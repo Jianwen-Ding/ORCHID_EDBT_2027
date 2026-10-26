@@ -41,8 +41,8 @@ struct PromiseData {
     ~PromiseData();
 
     const void* getData() const;
-    // Appends an aligned upload. Caller checks capacity and retains the source until sync.
-    void uploadCpuDataAsync(const void* data, size_t size);
+    // Uploads at a byte offset. Caller checks capacity and retains the source until sync.
+    void uploadCpuDataAsync(const void* data, size_t size, size_t offset);
     void syncGpuData();
     PromiseCapsule collectRawCpuCopy();
 };

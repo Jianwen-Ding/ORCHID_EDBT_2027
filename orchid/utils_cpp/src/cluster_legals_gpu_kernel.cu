@@ -23,13 +23,12 @@ PromiseData::~PromiseData() {
 const void* PromiseData::getData() const {
     return m_data;
 }
-void PromiseData::uploadCpuDataAsync(const void* data, size_t size) {
+void PromiseData::uploadCpuDataAsync(const void* data, size_t size, size_t offset) {
     if (size != 0) {
-        void* destination = static_cast<uint8_t*>(m_data) + m_usedSize;
+        void* destination = static_cast<uint8_t*>(m_data) + offset;
         checkGpuStatus(cudaMemcpyAsync(destination, data, size,
                                        cudaMemcpyHostToDevice, m_stream));
     }
-    m_usedSize += roundToAlignment(size);
 }
 
 void PromiseData::syncGpuData() {
