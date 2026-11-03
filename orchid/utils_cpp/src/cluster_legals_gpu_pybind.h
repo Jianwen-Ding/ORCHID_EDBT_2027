@@ -298,9 +298,9 @@ public:
     CpuUploadCapsule m_uploadSources;
 
     // >>> C++/Cuda exclusive <<<
-    std::unique_ptr<PromiseData> m_data;
+    std::shared_ptr<PromiseData> m_data;
 
-    GpuPromise(std::unique_ptr<PromiseData> data);
+    GpuPromise(std::shared_ptr<PromiseData> data);
     const GpuPromise& operator=(const GpuPromise& promise) = delete;
 
     // >>> Pybind <<<
@@ -318,13 +318,13 @@ std::shared_ptr<GpuPromise> uploadToGpu_out_py(py::args args);
 #if defined(ENABLE_GPU)
 
 #include <vector>
-static inline std::vector<PromiseData*> gatherPromises(std::vector<const GpuBuffer*> buffers) {
-    std::vector<PromiseData*> ret;
+static inline std::vector<std::shared_ptr<PromiseData>> gatherPromises(std::vector<const GpuBuffer*> buffers) {
+    std::vector<std::shared_ptr<PromiseData>> ret;
     for (size_t i = 0 ; i < buffers.size() ; i += 1) {
         if (!buffers[i]->m_promise) {
             throw std::runtime_error("Span has not been uploaded to the GPU yet");
         }
-        PromiseData* promise = buffers[i]->m_promise->m_data.get();
+        std::shared_ptr<PromiseData> promise = buffers[i]->m_promise->m_data;
         if (std::find(ret.begin(), ret.end(), promise) == ret.end()) {
             ret.push_back(promise);
         }
@@ -336,7 +336,7 @@ inline GpuBuffer::GpuBuffer(void* data, size_t size, std::shared_ptr<GpuPromise>
 template <typename T>
 inline GpuSpan<T>::GpuSpan(void* data, size_t size, std::shared_ptr<GpuPromise> promise)
     : GpuBuffer(data, size, std::move(promise)), m_uploaded(true) {}
-inline GpuPromise::GpuPromise(std::unique_ptr<PromiseData> data) : m_data(std::move(data)) {
+inline GpuPromise::GpuPromise(std::shared_ptr<PromiseData> data) : m_data(std::move(data)) {
     if (!m_data) {
         throw std::runtime_error("GPU kernel returned no data");
     }
@@ -421,7 +421,7 @@ inline std::shared_ptr<GpuPromise> uploadToGpu_out_py(py::args args) {
     }
 
     // Creates a block of data with needed size
-    std::unique_ptr<PromiseData> promiseData = std::make_unique<PromiseData>(cumulative_size);
+    std::shared_ptr<PromiseData> promiseData = std::make_unique<PromiseData>(cumulative_size);
     void* rawDataIter = promiseData->m_data;
     std::shared_ptr<GpuPromise> promise = std::make_shared<GpuPromise>(std::move(promiseData));
     promise->m_uploadSources.sources.reserve(argLength);
@@ -456,6 +456,7 @@ inline std::shared_ptr<GpuPromise> uploadToGpu_out_py(py::args args) {
         promise->m_data->syncGpuData();
         throw;
     }
+    promise->m_data->finalizePromise();
     return promise;
 }
 
@@ -509,7 +510,7 @@ inline GpuSpan<uint8_t> predicate_results_to_bitmap_gpu_out_py (
         static_cast<const int64_t*>(posting_queries.getBuffer().m_data),
         static_cast<const uint8_t*>(dense_masks.getBuffer().m_data), 
         static_cast<const int64_t*>(dense_mask_queries.getBuffer().m_data), 
-        n_queries, bytes_per_query, n_docs));
+        n_queries, bytes_per_query, n_docs, posting_query_count, mask_query_count));
     return result->collectBufferAsync();
 }
 
@@ -541,7 +542,7 @@ struct PromiseData { };
 inline GpuBuffer::GpuBuffer(void* data, size_t size, std::shared_ptr<GpuPromise> promise) {
     throw std::runtime_error("GPU backend not compiled");
 }
-inline GpuPromise::GpuPromise(std::unique_ptr<PromiseData> data) {
+inline GpuPromise::GpuPromise(std::shared_ptr<PromiseData> data) {
     throw std::runtime_error("GPU backend not compiled");
 }
 template <typename T>

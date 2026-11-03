@@ -40,6 +40,9 @@ struct PromiseData {
     PromiseData(size_t size);
     ~PromiseData();
 
+    // Sets an event at the end of the stream.
+    void finalizePromise();
+
     const void* getData() const;
     // Uploads at a byte offset. Caller checks capacity and retains the source until sync.
     void uploadCpuDataAsync(const void* data, size_t size, size_t offset);
@@ -49,8 +52,8 @@ struct PromiseData {
 
 PromiseCapsule copyToCpu(const void* gpuData, size_t size);
 
-std::unique_ptr<PromiseData> predicate_results_to_bitmap_gpu_impl (
-    std::vector<PromiseData*> blockingPromises,
+std::shared_ptr<PromiseData> predicate_results_to_bitmap_gpu_impl (
+    std::vector<std::shared_ptr<PromiseData>> blockingPromises,
     const uint32_t* posting_lists,
     const int64_t* posting_sizes,
     const int64_t* posting_queries,
@@ -61,8 +64,8 @@ std::unique_ptr<PromiseData> predicate_results_to_bitmap_gpu_impl (
     int32_t n_docs);
 
 
-std::unique_ptr<PromiseData> cluster_legals_preordered_packed_gpu_impl (
-    std::vector<PromiseData*> blockingPromises,
+std::shared_ptr<PromiseData> cluster_legals_preordered_packed_gpu_impl (
+    std::vector<std::shared_ptr<PromiseData>> blockingPromises,
     const uint8_t* mask_packed_buffer,
     int32_t n_queries,
     int32_t bytes_per_query,

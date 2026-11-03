@@ -25,9 +25,14 @@ dist/
 *.cagra
 *.DS_Store
 *.helper
+*.vscode
 /.helper-logs/
 /.local-smoke/
 /scripts/helper.py
 /scripts/test_helper.py
 /.helper-src/
 /.helper-build/
+.vscode/settings.json
+.vscode/extensions.json
+.vscode/README.md
+.vscode/.gitignore
