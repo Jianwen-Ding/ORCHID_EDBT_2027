@@ -410,8 +410,8 @@ def materialize_results_gpu(
     
     gpu.upload_to_gpu(
         posting_list_span := gpu.gpu_prep(posting_lists if posting_lists else _EMPTY_IDS),
-        list_sizing_span := gpu.gpu_prep(np.asarray(posting_list_sizes, dtype=np.int64)),
-        list_indices_span := gpu.gpu_prep(np.asarray(list_indices, dtype=np.int64)),
+        list_sizing_span := gpu.gpu_prep(np.asarray(posting_list_sizes, dtype=np.int32)),
+        list_indices_span := gpu.gpu_prep(np.asarray(list_indices, dtype=np.int32)),
         bit_mask_span := gpu.gpu_prep(bit_masks if bit_masks else np.empty(0, dtype=np.uint8)),
         mask_indices_span := gpu.gpu_prep(np.asarray(bit_mask_indices, dtype=np.int64)),
     )

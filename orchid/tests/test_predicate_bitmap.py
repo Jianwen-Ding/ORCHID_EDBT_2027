@@ -112,8 +112,12 @@ class PredicateGpuArgumentsTest(unittest.TestCase):
         inputs = [call.args[0] for call in api.gpu_prep.call_args_list]
         self.assertIs(inputs[0][0], ids)
         self.assertIs(inputs[3][0], bitmap)
-        for actual, expected in ((inputs[1], [3, 0]), (inputs[2], [0, 2]), (inputs[4], [1])):
-            self.assertEqual(actual.dtype, np.int64)
+        for actual, expected, dtype in (
+            (inputs[1], [3, 0], np.int32),
+            (inputs[2], [0, 2], np.int32),
+            (inputs[4], [1], np.int64),
+        ):
+            self.assertEqual(actual.dtype, dtype)
             np.testing.assert_array_equal(actual, expected)
         api.upload_to_gpu.assert_called_once_with(*spans)
         api.predicate_results_to_bitmap.assert_called_once_with(*spans, 3, 19)
@@ -133,8 +137,8 @@ class PredicateGpuArgumentsTest(unittest.TestCase):
                     if isinstance(inputs[index], np.ndarray):
                         self.assertEqual(inputs[index].size, 0)
                         self.assertEqual(inputs[index].dtype, dtype)
-                for index in (1, 2, 4):
-                    self.assertEqual(inputs[index].dtype, np.int64)
+                for index, dtype in ((1, np.int32), (2, np.int32), (4, np.int64)):
+                    self.assertEqual(inputs[index].dtype, dtype)
                 api.predicate_results_to_bitmap.assert_called_once_with(
                     *spans, len(results), 19)
 

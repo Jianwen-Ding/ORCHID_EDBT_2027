@@ -18,11 +18,14 @@ inline void checkGpuStatus(cudaError_t status) {
 
 inline int GpuAlignment = 16;
 
-inline size_t roundToAlignment(size_t number) {
-    number = (number + GpuAlignment - 1);
-    number /= GpuAlignment;
-    number *= GpuAlignment;
+inline size_t round(size_t number, int roundedNumber) {
+    number = (number + roundedNumber - 1);
+    number /= roundedNumber;
+    number *= roundedNumber;
     return number;
+}
+inline size_t roundToAlignment(size_t number) {
+    return round(number, GpuAlignment);
 }
 
 struct PromiseCapsule {
@@ -30,14 +33,22 @@ struct PromiseCapsule {
     std::function<void(void*)> free;
 };
 
+struct StreamCapsule {
+    cudaEvent_t m_event = nullptr;
+    cudaStream_t m_stream = nullptr;
+
+    void sync();
+    StreamCapsule();
+    ~StreamCapsule();
+};
+
 struct PromiseData {
     void* m_data = nullptr;
     size_t m_size = 0;
     size_t m_usedSize = 0;
-    cudaEvent_t m_event = nullptr;
-    cudaStream_t m_stream = nullptr;
+    std::shared_ptr<StreamCapsule> m_stream;
 
-    PromiseData(size_t size);
+    PromiseData(size_t size, std::shared_ptr<StreamCapsule> stream = nullptr);
     ~PromiseData();
 
     // Sets an event at the end of the stream.
@@ -53,10 +64,10 @@ struct PromiseData {
 PromiseCapsule copyToCpu(const void* gpuData, size_t size);
 
 std::shared_ptr<PromiseData> predicate_results_to_bitmap_gpu_impl (
-    std::vector<std::shared_ptr<PromiseData>> blockingPromises,
+    std::vector<std::shared_ptr<StreamCapsule>> blockingPromises,
     const uint32_t* posting_lists,
-    const int64_t* posting_sizes,
-    const int64_t* posting_queries,
+    const int32_t* posting_sizes,
+    const int32_t* posting_queries,
     const uint8_t* dense_masks,
     const int64_t* dense_mask_queries,
     int32_t n_queries,
@@ -65,7 +76,7 @@ std::shared_ptr<PromiseData> predicate_results_to_bitmap_gpu_impl (
 
 
 std::shared_ptr<PromiseData> cluster_legals_preordered_packed_gpu_impl (
-    std::vector<std::shared_ptr<PromiseData>> blockingPromises,
+    std::vector<std::shared_ptr<StreamCapsule>> blockingPromises,
     const uint8_t* mask_packed_buffer,
     int32_t n_queries,
     int32_t bytes_per_query,

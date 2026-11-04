@@ -318,15 +318,15 @@ std::shared_ptr<GpuPromise> uploadToGpu_out_py(py::args args);
 #if defined(ENABLE_GPU)
 
 #include <vector>
-static inline std::vector<std::shared_ptr<PromiseData>> gatherPromises(std::vector<const GpuBuffer*> buffers) {
-    std::vector<std::shared_ptr<PromiseData>> ret;
+static inline std::vector<std::shared_ptr<StreamCapsule>> gatherPromises(std::vector<const GpuBuffer*> buffers) {
+    std::vector<std::shared_ptr<StreamCapsule>> ret;
     for (size_t i = 0 ; i < buffers.size() ; i += 1) {
         if (!buffers[i]->m_promise) {
             throw std::runtime_error("Span has not been uploaded to the GPU yet");
         }
-        std::shared_ptr<PromiseData> promise = buffers[i]->m_promise->m_data;
-        if (std::find(ret.begin(), ret.end(), promise) == ret.end()) {
-            ret.push_back(promise);
+        std::shared_ptr<StreamCapsule> stream = buffers[i]->m_promise->m_stream;
+        if (std::find(ret.begin(), ret.end(), stream) == ret.end()) {
+            ret.push_back(stream);
         }
     }
     return ret;
@@ -462,8 +462,8 @@ inline std::shared_ptr<GpuPromise> uploadToGpu_out_py(py::args args) {
 
 inline GpuSpan<uint8_t> predicate_results_to_bitmap_gpu_out_py (
     const GpuSpan<uint32_t> posting_lists,
-    const GpuSpan<int64_t> posting_sizes,
-    const GpuSpan<int64_t> posting_queries,
+    const GpuSpan<int32_t> posting_sizes,
+    const GpuSpan<int32_t> posting_queries,
     const GpuSpan<uint8_t> dense_masks,
     const GpuSpan<int64_t> dense_mask_queries,
     int32_t n_queries,
@@ -484,8 +484,8 @@ inline GpuSpan<uint8_t> predicate_results_to_bitmap_gpu_out_py (
         return buffer.m_size / elementSize;
     };
     const size_t posting_count = elementCount(posting_lists, sizeof(uint32_t), "posting_lists");
-    const size_t size_count = elementCount(posting_sizes, sizeof(int64_t), "posting_sizes");
-    const size_t posting_query_count = elementCount(posting_queries, sizeof(int64_t), "posting_queries");
+    const size_t size_count = elementCount(posting_sizes, sizeof(int32_t), "posting_sizes");
+    const size_t posting_query_count = elementCount(posting_queries, sizeof(int32_t), "posting_queries");
     const size_t mask_bytes = elementCount(dense_masks, sizeof(uint8_t), "dense_masks");
     const size_t mask_query_count = elementCount(dense_mask_queries, sizeof(int64_t), "dense_mask_queries");
     if (size_count != posting_query_count) {
@@ -506,8 +506,8 @@ inline GpuSpan<uint8_t> predicate_results_to_bitmap_gpu_out_py (
     auto result = std::make_shared<GpuPromise>(predicate_results_to_bitmap_gpu_impl(
         gatherPromises({&posting_lists, &posting_sizes, &posting_queries, &dense_masks, &dense_mask_queries}),
         static_cast<const uint32_t*>(posting_lists.getBuffer().m_data), 
-        static_cast<const int64_t*>(posting_sizes.getBuffer().m_data), 
-        static_cast<const int64_t*>(posting_queries.getBuffer().m_data),
+        static_cast<const int32_t*>(posting_sizes.getBuffer().m_data), 
+        static_cast<const int32_t*>(posting_queries.getBuffer().m_data),
         static_cast<const uint8_t*>(dense_masks.getBuffer().m_data), 
         static_cast<const int64_t*>(dense_mask_queries.getBuffer().m_data), 
         n_queries, bytes_per_query, n_docs, posting_query_count, mask_query_count));
@@ -568,8 +568,8 @@ inline std::shared_ptr<GpuPromise> uploadToGpu_out_py(py::args args) {
 
 inline GpuSpan<uint8_t> predicate_results_to_bitmap_gpu_out_py (
     const GpuSpan<uint32_t> posting_lists,
-    const GpuSpan<int64_t> posting_sizes,
-    const GpuSpan<int64_t> posting_queries,
+    const GpuSpan<int32_t> posting_sizes,
+    const GpuSpan<int32_t> posting_queries,
     const GpuSpan<uint8_t> dense_masks,
     const GpuSpan<int64_t> mask_queries,
     int32_t n_queries,
