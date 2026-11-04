@@ -388,6 +388,8 @@ void GpuIndexIVF::searchImpl_(
                 selectorBitmapPtr = bitmask->buffer;
             } 
             else if (bitmask->deviceOwnership & BitmaskOwnership::CpuOwned) {
+                const size_t bitmapBytes = size_t(n) * bitmask->bytesPerBitmask;
+                auto stream = resources_->getDefaultStream(config_.device);
                 if (bitmapBytes > selectorPinnedBufferSize_) {
                     if (selectorPinnedBuffer_) {
                         CUDA_VERIFY(cudaFreeHost(selectorPinnedBuffer_));
@@ -405,7 +407,7 @@ void GpuIndexIVF::searchImpl_(
                 }
 
                 if (bitmapBytes > 0) {
-                    std::memcpy(selectorPinnedBuffer_, bitmapSelector->base, bitmapBytes);
+                    std::memcpy(selectorPinnedBuffer_, bitmask->buffer, bitmapBytes);
 
                     auto tmpBitmap = toDeviceTemporary<uint8_t, 1>(
                             resources_.get(),
@@ -413,12 +415,12 @@ void GpuIndexIVF::searchImpl_(
                             selectorPinnedBuffer_,
                             stream,
                             {static_cast<idx_t>(bitmapBytes)});
-                    selectorBitmapStride = bitmapSelector->bytes_per_bitmap;
+                    selectorBitmapStride = bitmask->bytesPerBitmask;
                     selectorBitmapTensor = std::move(tmpBitmap);
                     selectorBitmapPtr =
                             reinterpret_cast<const uint8_t*>(selectorBitmapTensor.data());
                 } else {
-                    selectorBitmapStride = bitmapSelector->bytes_per_bitmap;
+                    selectorBitmapStride = bitmask->bytesPerBitmask;
                     selectorBitmapPtr = nullptr;
                 }
             }

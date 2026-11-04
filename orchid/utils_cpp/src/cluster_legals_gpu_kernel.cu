@@ -240,6 +240,6 @@ std::shared_ptr<PromiseData> cluster_legals_preordered_packed_gpu_impl (
     int32_t bytesPerQuery,
     const int32_t* d_clusterOffsets,
     const int32_t* d_clusterCounts,
-    int32_t n_list) {
+    int32_t nList) {
     throw std::runtime_error("GPU cluster legals kernel not implemented");
 }

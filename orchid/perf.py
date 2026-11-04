@@ -25,7 +25,7 @@ from ivf_utils import (
     load_or_build_train_c,
     load_svd_mask,
 )
-from predicate_index import materialize_results
+from predicate_index import materialize_results, materialize_results_gpu
 from predicate_workload import load_or_build_predicate_workload
 from perf_results import (
     CLUSTER_TIMING_STAGES,
@@ -100,6 +100,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num_queries", "-nq", type=int, default=10000)
     parser.add_argument("--beta", "-b", type=float, default=0.00)
     parser.add_argument("--iterations", "-i", type=int, default=10)
+    parser.add_argument(
+        "--fixed-iterations",
+        action="store_true",
+        help="Run exactly --iterations measured passes, overriding adaptive settings",
+    )
     parser.add_argument("--min-iterations", type=int, default=None)
     parser.add_argument("--qps-relative-ci-half-width", type=float, default=None)
     parser.add_argument("--warmup", type=int, default=3)
@@ -159,6 +164,7 @@ def _cli_override_dests(parser: argparse.ArgumentParser, argv: list[str]) -> set
         if action is not None and action.dest not in {
             "config",
             "dset_cfg",
+            "fixed_iterations",
         }:
             overrides.add(action.dest)
     return overrides
@@ -183,6 +189,7 @@ def parse_args() -> tuple[BuildIvfConfig, DatasetConfig]:
     argv = sys.argv[1:]
     args = parser.parse_args(argv)
     args_dict = vars(args)
+    fixed_iterations = args_dict.pop("fixed_iterations")
     config_path = args_dict.pop("config", None)
     dset_cfg = args_dict.pop("dset_cfg", None)
     dataset_fields = ("vec_zarr", "pred_zarr", "nlists")
@@ -207,6 +214,10 @@ def parse_args() -> tuple[BuildIvfConfig, DatasetConfig]:
             dataset_payload[dest] = dataset_overrides[dest]
             continue
         base[dest] = args_dict[dest]
+
+    if fixed_iterations:
+        base["min_iterations"] = None
+        base["qps_relative_ci_half_width"] = None
 
     missing = [
         field
@@ -459,6 +470,12 @@ def main():
         for stat in ("median", "p95")
     ]
 
+    print(
+        f"Execution device: {'GPU' if use_gpu else 'CPU'} | "
+        f"queries per batch: {B} | "
+        f"batches per trace: {(num_queries + B - 1) // B}",
+        flush=True,
+    )
     print("n_probe,recall,qps")
     print(
         "timings_batch_header,n_probe,samples,qps,"
@@ -502,9 +519,8 @@ def main():
                 stage_start = perf_counter()
                 # Create GPU Alternative here (Id -> Bitmap )
                 if use_gpu:
-                    mi = materialize_results_gpu(predicate_results, n, predicate_bitmap[:size])
-                    mi = mi.collect_to_cpu().reshape(size, (n + 7) // 8)
-                    predicate_bitmap = mi
+                    mi = materialize_results_gpu(predicate_results, n)
+                    mi = mi.collect_to_cpu().reshape(size, bytes_per_query)
                 else:
                     mi = materialize_results(
                         predicate_results, n, predicate_bitmap[:size], threads=0
