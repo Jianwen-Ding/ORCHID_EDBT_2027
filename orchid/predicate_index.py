@@ -413,14 +413,13 @@ def materialize_results_gpu(
         list_sizing_span := gpu.gpu_prep(np.asarray(posting_list_sizes, dtype=np.int32)),
         list_indices_span := gpu.gpu_prep(np.asarray(list_indices, dtype=np.int32)),
         bit_mask_span := gpu.gpu_prep(bit_masks if bit_masks else np.empty(0, dtype=np.uint8)),
-        mask_indices_span := gpu.gpu_prep(np.asarray(bit_mask_indices, dtype=np.int64)),
     )
     return gpu.predicate_results_to_bitmap(
         posting_list_span,
         list_sizing_span,
         list_indices_span,
         bit_mask_span,
-        mask_indices_span,
+        np.asarray(bit_mask_indices, dtype=np.int64),
         len(results),
         n_docs,
     )

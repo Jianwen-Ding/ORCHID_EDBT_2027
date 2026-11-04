@@ -293,14 +293,14 @@ struct CpuUploadCapsule {
 class GpuPromise : public std::enable_shared_from_this<GpuPromise> {
 public:
 
-    // Member order matters: m_data is destroyed first, synchronizing its stream
-    // before the Python array references are released on the owning thread.
+    // Python upload owners are retained until queued copies have completed.
     CpuUploadCapsule m_uploadSources;
 
     // >>> C++/Cuda exclusive <<<
     std::shared_ptr<PromiseData> m_data;
 
     GpuPromise(std::shared_ptr<PromiseData> data);
+    ~GpuPromise();
     const GpuPromise& operator=(const GpuPromise& promise) = delete;
 
     // >>> Pybind <<<
@@ -324,7 +324,7 @@ static inline std::vector<std::shared_ptr<StreamCapsule>> gatherPromises(std::ve
         if (!buffers[i]->m_promise) {
             throw std::runtime_error("Span has not been uploaded to the GPU yet");
         }
-        std::shared_ptr<StreamCapsule> stream = buffers[i]->m_promise->m_stream;
+        std::shared_ptr<StreamCapsule> stream = buffers[i]->m_promise->m_data->m_stream;
         if (std::find(ret.begin(), ret.end(), stream) == ret.end()) {
             ret.push_back(stream);
         }
@@ -339,6 +339,12 @@ inline GpuSpan<T>::GpuSpan(void* data, size_t size, std::shared_ptr<GpuPromise> 
 inline GpuPromise::GpuPromise(std::shared_ptr<PromiseData> data) : m_data(std::move(data)) {
     if (!m_data) {
         throw std::runtime_error("GPU kernel returned no data");
+    }
+}
+inline GpuPromise::~GpuPromise() {
+    // Stream-ordered device frees do not wait for copies from Python arrays.
+    if (!m_uploadSources.sources.empty() && m_data) {
+        cudaStreamSynchronize(m_data->m_stream->m_stream);
     }
 }
 template <typename T>
@@ -425,18 +431,19 @@ inline std::shared_ptr<GpuPromise> uploadToGpu_out_py(py::args args) {
     void* rawDataIter = promiseData->m_data;
     std::shared_ptr<GpuPromise> promise = std::make_shared<GpuPromise>(std::move(promiseData));
     promise->m_uploadSources.sources.reserve(argLength);
+    size_t uploadOffset = 0;
 
     try {
         // Begins partitioning data along block of data
         for (size_t i = 0; i < argLength; ++i) {
             PromiseData& data = *promise->m_data;
             size_t alignedSize = roundToAlignment(dataSizes[i]);
-            if (data.m_usedSize > data.m_size || alignedSize > data.m_size - data.m_usedSize) {
+            if (uploadOffset > data.m_size || alignedSize > data.m_size - uploadOffset) {
                 throw std::runtime_error("GPU data arena is full");
             }
             GpuBuffer addBuffer{rawDataIter, dataSizes[i], promise};
             auto sources = detail::SpanUtil::setSpanBuffer(dataHandles[i], std::move(addBuffer));
-            size_t offset = data.m_usedSize;
+            size_t offset = uploadOffset;
             for (auto& source : sources) {
                 // Retain each owner and upload directly, without CPU concatenation.
                 // Source arrays must remain unchanged until upload completion.
@@ -445,7 +452,7 @@ inline std::shared_ptr<GpuPromise> uploadToGpu_out_py(py::args args) {
                 data.uploadCpuDataAsync(promise->m_uploadSources.sources.back().data(), bytes, offset);
                 offset += bytes;
             }
-            data.m_usedSize += alignedSize;
+            uploadOffset += alignedSize;
 
             if (rawDataIter != nullptr) {
                 rawDataIter = static_cast<uint8_t*>(rawDataIter) + roundToAlignment(dataSizes[i]);
@@ -465,7 +472,7 @@ inline GpuSpan<uint8_t> predicate_results_to_bitmap_gpu_out_py (
     const GpuSpan<int32_t> posting_sizes,
     const GpuSpan<int32_t> posting_queries,
     const GpuSpan<uint8_t> dense_masks,
-    const GpuSpan<int64_t> dense_mask_queries,
+    const py::array_t<int64_t, py::array::c_style | py::array::forcecast> dense_mask_queries,
     int32_t n_queries,
     int32_t n_docs) {
     if (n_queries < 0) throw py::value_error("n_queries must be nonnegative");
@@ -487,7 +494,10 @@ inline GpuSpan<uint8_t> predicate_results_to_bitmap_gpu_out_py (
     const size_t size_count = elementCount(posting_sizes, sizeof(int32_t), "posting_sizes");
     const size_t posting_query_count = elementCount(posting_queries, sizeof(int32_t), "posting_queries");
     const size_t mask_bytes = elementCount(dense_masks, sizeof(uint8_t), "dense_masks");
-    const size_t mask_query_count = elementCount(dense_mask_queries, sizeof(int64_t), "dense_mask_queries");
+    if (dense_mask_queries.ndim() != 1) {
+        throw py::value_error("dense_mask_queries must be one-dimensional");
+    }
+    const size_t mask_query_count = static_cast<size_t>(dense_mask_queries.size());
     if (size_count != posting_query_count) {
         throw py::value_error("posting_sizes and posting_queries must have the same number of elements");
     }
@@ -503,14 +513,21 @@ inline GpuSpan<uint8_t> predicate_results_to_bitmap_gpu_out_py (
         mask_bytes != mask_query_count * width) {
         throw py::value_error("dense_masks must contain ceil(n_docs / 8) bytes per dense query");
     }
+    for (size_t i = 0; i < mask_query_count; ++i) {
+        if (dense_mask_queries.data()[i] < 0 || dense_mask_queries.data()[i] >= n_queries) {
+            throw py::value_error("dense_mask_queries contains a query outside [0, n_queries)");
+        }
+    }
     auto result = std::make_shared<GpuPromise>(predicate_results_to_bitmap_gpu_impl(
-        gatherPromises({&posting_lists, &posting_sizes, &posting_queries, &dense_masks, &dense_mask_queries}),
+        gatherPromises({&posting_lists, &posting_sizes, &posting_queries, &dense_masks}),
         static_cast<const uint32_t*>(posting_lists.getBuffer().m_data), 
         static_cast<const int32_t*>(posting_sizes.getBuffer().m_data), 
         static_cast<const int32_t*>(posting_queries.getBuffer().m_data),
         static_cast<const uint8_t*>(dense_masks.getBuffer().m_data), 
-        static_cast<const int64_t*>(dense_mask_queries.getBuffer().m_data), 
-        n_queries, bytes_per_query, n_docs, posting_query_count, mask_query_count));
+        dense_mask_queries.data(),
+        n_queries, bytes_per_query,
+        static_cast<int32_t>(posting_query_count), static_cast<int32_t>(mask_query_count),
+        static_cast<int64_t>(posting_count)));
     return result->collectBufferAsync();
 }
 
@@ -526,7 +543,7 @@ inline GpuSpan<float> cluster_legals_preordered_packed_gpu_out_py (
 
     auto result = std::make_shared<GpuPromise>(cluster_legals_preordered_packed_gpu_impl(
         gatherPromises({&mask_packed_buffer, &cluster_offsets, &cluster_counts}),
-        static_cast<const uint8_t*>(mask_packed_buffer.getBuffer().m_data), n_queries, bytes_per_query, n_docs,
+        static_cast<const uint8_t*>(mask_packed_buffer.getBuffer().m_data), n_queries, bytes_per_query,
         static_cast<const int32_t*>(cluster_offsets.getBuffer().m_data), 
         static_cast<const int32_t*>(cluster_counts.getBuffer().m_data), 
         n_list));
@@ -545,6 +562,7 @@ inline GpuBuffer::GpuBuffer(void* data, size_t size, std::shared_ptr<GpuPromise>
 inline GpuPromise::GpuPromise(std::shared_ptr<PromiseData> data) {
     throw std::runtime_error("GPU backend not compiled");
 }
+inline GpuPromise::~GpuPromise() = default;
 template <typename T>
 inline py::array_t<T, py::array::c_style> GpuSpan<T>::collectToCpu() const {
     throw std::runtime_error("GPU backend not compiled");
@@ -571,7 +589,7 @@ inline GpuSpan<uint8_t> predicate_results_to_bitmap_gpu_out_py (
     const GpuSpan<int32_t> posting_sizes,
     const GpuSpan<int32_t> posting_queries,
     const GpuSpan<uint8_t> dense_masks,
-    const GpuSpan<int64_t> mask_queries,
+    const py::array_t<int64_t, py::array::c_style | py::array::forcecast> mask_queries,
     int32_t n_queries,
     int32_t n_docs) {
     throw std::runtime_error("GPU backend not compiled");

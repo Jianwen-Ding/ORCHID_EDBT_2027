@@ -17,6 +17,7 @@ class GpuPredicateValidationTest(unittest.TestCase):
             dense_mask_queries=np.array([1], dtype=np.int64),
         )
         values.update(changes)
+        mask_queries = values.pop("dense_mask_queries")
         try:
             spans = [gpu.gpu_prep(value) for value in values.values()]
             promise = gpu.upload_to_gpu(*spans)
@@ -24,7 +25,7 @@ class GpuPredicateValidationTest(unittest.TestCase):
             if "GPU backend not compiled" in str(error):
                 self.skipTest("GPU backend not compiled")
             raise
-        return spans, promise
+        return [*spans, mask_queries], promise
 
     def test_rejects_inconsistent_span_sizes(self):
         cases = [
@@ -39,6 +40,9 @@ class GpuPredicateValidationTest(unittest.TestCase):
             ({"posting_sizes": np.array([], dtype=np.int32),
               "posting_queries": np.array([], dtype=np.int32)}, 1, 19, "posting_lists must be empty"),
             ({"dense_mask_queries": np.array([], dtype=np.int64)}, 2, 19, "total n_queries"),
+            ({"dense_mask_queries": np.array([-1], dtype=np.int64)}, 2, 19, "query outside"),
+            ({"dense_mask_queries": np.array([2], dtype=np.int64)}, 2, 19, "query outside"),
+            ({"dense_mask_queries": np.array([[1]], dtype=np.int64)}, 2, 19, "one-dimensional"),
         ]
         for changes, n_queries, n_docs, message in cases:
             with self.subTest(changes=changes, n_queries=n_queries, n_docs=n_docs):

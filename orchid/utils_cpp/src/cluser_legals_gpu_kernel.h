@@ -44,8 +44,7 @@ struct StreamCapsule {
 
 struct PromiseData {
     void* m_data = nullptr;
-    size_t m_size = 0;
-    size_t m_usedSize = 0;
+    size_t m_size = 0; // Logical byte count; allocation is aligned.
     std::shared_ptr<StreamCapsule> m_stream;
 
     PromiseData(size_t size, std::shared_ptr<StreamCapsule> stream = nullptr);
@@ -56,31 +55,32 @@ struct PromiseData {
 
     const void* getData() const;
     // Uploads at a byte offset. Caller checks capacity and retains the source until sync.
-    void uploadCpuDataAsync(const void* data, size_t size, size_t offset);
+    void uploadCpuDataAsync(const void* h_data, size_t size, size_t offset);
     void syncGpuData();
     PromiseCapsule collectRawCpuCopy();
 };
 
-PromiseCapsule copyToCpu(const void* gpuData, size_t size);
+PromiseCapsule copyToCpu(const void* d_gpuData, size_t size);
 
 std::shared_ptr<PromiseData> predicate_results_to_bitmap_gpu_impl (
     std::vector<std::shared_ptr<StreamCapsule>> blockingPromises,
-    const uint32_t* posting_lists,
-    const int32_t* posting_sizes,
-    const int32_t* posting_queries,
-    const uint8_t* dense_masks,
-    const int64_t* dense_mask_queries,
-    int32_t n_queries,
-    int32_t bytes_per_query,
-    int32_t n_docs);
+    const uint32_t* d_postingLists,
+    const int32_t* d_postingSizes,
+    const int32_t* d_postingQueries,
+    const uint8_t* d_denseMasks,
+    const int64_t* h_denseMaskQueries,
+    int32_t nQueries,
+    int32_t bytesPerQuery,
+    int32_t postingCount,
+    int32_t denseMaskCount,
+    int64_t postingEntries);
 
 
 std::shared_ptr<PromiseData> cluster_legals_preordered_packed_gpu_impl (
     std::vector<std::shared_ptr<StreamCapsule>> blockingPromises,
-    const uint8_t* mask_packed_buffer,
-    int32_t n_queries,
-    int32_t bytes_per_query,
-    int32_t n_docs,
-    const int32_t* cluster_offsets,
-    const int32_t* cluster_counts,
-    int32_t n_list);
+    const uint8_t* d_maskPackedBuffer,
+    int32_t nQueries,
+    int32_t bytesPerQuery,
+    const int32_t* d_clusterOffsets,
+    const int32_t* d_clusterCounts,
+    int32_t nList);
