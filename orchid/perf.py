@@ -30,6 +30,7 @@ from predicate_workload import load_or_build_predicate_workload
 from perf_results import (
     CLUSTER_TIMING_STAGES,
     SweepResult,
+    format_sweep_summary,
     recall_at_k,
     require_iteration_agreement,
     require_measurement_convergence,
@@ -243,6 +244,7 @@ def main():
     args, dataset = parse_args()
     timing_stages = CLUSTER_TIMING_STAGES
     debug = bool(os.getenv("PERF_DEBUG"))
+    pretty_output = os.getenv("ORCHID_PRETTY_OUTPUT") == "1"
 
     use_gpu = args.gpu
     use_gpu_build = args.gpu_build
@@ -278,6 +280,10 @@ def main():
         raise ValueError("warmup must be non-negative")
 
     beta = args.beta
+    method = (
+        "pre-filter" if flat else "orchid" if args.alpha != 0.0
+        else "orchid-p" if beta != 0.0 else "ivf"
+    )
     vec_zarr = dataset.vec_zarr
     pred_zarr = dataset.pred_zarr
     cache_dir = Path(args.cache_base) / dataset.name / args.exp_name
@@ -292,7 +298,16 @@ def main():
         "cache_dir": str(cache_dir),
         "log_dir": str(log_dir),
     }
-    print(yaml.safe_dump(resolved_config, sort_keys=False))
+    if pretty_output:
+        print(f"\nPreparing {method.upper()} / {dataset.name.upper()}", flush=True)
+        print(
+            f"Search device: {'GPU' if use_gpu else 'CPU'} | "
+            f"Clustering setup: {'GPU' if use_gpu_build else 'CPU'} | "
+            f"Queries per pass: {args.num_queries:,}",
+            flush=True,
+        )
+    else:
+        print(yaml.safe_dump(resolved_config, sort_keys=False))
 
     k = args.k
     rk = args.k
@@ -330,7 +345,7 @@ def main():
     with task("Normalize vectors", verbose=True):
         docs /= np.linalg.norm(docs, axis=1, keepdims=True)
 
-    with task("Prepare clustering inputs", verbose=True):
+    with task("Clustering setup (total)", verbose=True):
         svd_mask = None
         if args.sig_dims > 0 and args.alpha != 0.0:
             svd_mask = load_svd_mask(
@@ -424,12 +439,12 @@ def main():
         with task("Upload to GPU", verbose=True):
             _gpu_resources, index = _clone_index_to_gpu(index, args.gpu_device)
 
-    with task("Compute rankings", verbose=True):
+    with task("Prepare query tensors", verbose=True):
         queries = np.ascontiguousarray(queries)
         centroids = np.ascontiguousarray(centroids)
         queries_t = torch.from_numpy(queries)
         centroids_t = torch.from_numpy(centroids[:, :d])
-    with task("Prepare predicate evaluation", verbose=True):
+    with task("Allocate predicate bitmap buffer", verbose=True):
         bytes_per_query = (n + 7) // 8
         predicate_bitmap = np.empty((B, bytes_per_query), dtype=np.uint8)
 
@@ -470,17 +485,20 @@ def main():
         for stat in ("median", "p95")
     ]
 
-    print(
-        f"Execution device: {'GPU' if use_gpu else 'CPU'} | "
-        f"queries per batch: {B} | "
-        f"batches per trace: {(num_queries + B - 1) // B}",
-        flush=True,
-    )
-    print("n_probe,recall,qps")
-    print(
-        "timings_batch_header,n_probe,samples,qps,"
-        + ",".join(timing_metric_fields)
-    )
+    if pretty_output:
+        print("\nMeasuring query batches (setup excluded)...", flush=True)
+    else:
+        print(
+            f"Execution device: {'GPU' if use_gpu else 'CPU'} | "
+            f"queries per batch: {B} | "
+            f"batches per trace: {(num_queries + B - 1) // B}",
+            flush=True,
+        )
+        print("n_probe,recall,qps")
+        print(
+            "timings_batch_header,n_probe,samples,qps,"
+            + ",".join(timing_metric_fields)
+        )
 
     for n_probe in nprobes:
         if not args.val_flat:
@@ -633,14 +651,23 @@ def main():
             assert measurement.qps_ci_lower is not None
             assert measurement.qps_ci_upper is not None
             assert measurement.qps_relative_ci_half_width is not None
-            print(
-                f"qps_confidence,{n_probe},"
-                f"{len(measurement.iteration_qps)},{measurement.qps:.2f},"
-                f"{measurement.qps_ci_lower:.2f},"
-                f"{measurement.qps_ci_upper:.2f},"
-                f"{measurement.qps_relative_ci_half_width:.4%}",
-                flush=True,
-            )
+            if pretty_output:
+                print(
+                    f"Probes {n_probe}: QPS confidence interval "
+                    f"{measurement.qps_ci_lower:,.2f} to "
+                    f"{measurement.qps_ci_upper:,.2f} queries/s "
+                    f"({len(measurement.iteration_qps)} measured passes)",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"qps_confidence,{n_probe},"
+                    f"{len(measurement.iteration_qps)},{measurement.qps:.2f},"
+                    f"{measurement.qps_ci_lower:.2f},"
+                    f"{measurement.qps_ci_upper:.2f},"
+                    f"{measurement.qps_relative_ci_half_width:.4%}",
+                    flush=True,
+                )
             require_measurement_convergence(
                 measurement,
                 context=measurement_context,
@@ -669,10 +696,11 @@ def main():
             f"{float(timing_record[field]):.6f}"
             for field in timing_metric_fields
         ]
-        print(
-            f"timings_batch,{n_probe},{timing_record['samples']},"
-            f"{measured_qps:.2f}," + ",".join(timing_values)
-        )
+        if not pretty_output:
+            print(
+                f"timings_batch,{n_probe},{timing_record['samples']},"
+                f"{measured_qps:.2f}," + ",".join(timing_values)
+            )
 
         returned = returned.reshape(-1, rk)
         result = SweepResult(
@@ -685,20 +713,32 @@ def main():
         sweep_results.append(result)
         result_str = f"{n_probe},{result.recall:.3f},{result.qps:.2f}"
 
-        print(result_str)
+        if pretty_output:
+            print(
+                format_sweep_summary(
+                    result, method=method, dataset=dataset.name,
+                    gpu=use_gpu, gpu_build=use_gpu_build,
+                    num_queries=num_queries, batch_size=B,
+                    measured_passes=len(measurement.iteration_qps),
+                    warmup=warmup, k=k,
+                ),
+                flush=True,
+            )
+        else:
+            print(result_str)
 
-    method = (
-        "pre-filter" if flat else "orchid" if args.alpha != 0.0
-        else "orchid-p" if beta != 0.0 else "ivf"
-    )
     experiment = args.exp_name or method
-    write_timing_results(
+    timing_output = write_timing_results(
         sweep_results, log_dir, experiment, parameter_name="n_probe"
     )
     output = write_sweep_results(
         sweep_results, log_dir, experiment, parameter_name="n_probe"
     )
-    print(f"Wrote sweep: {output}")
+    if pretty_output:
+        print(f"\nSaved recall / throughput: {output}", flush=True)
+        print(f"Saved stage timings:      {timing_output}", flush=True)
+    else:
+        print(f"Wrote sweep: {output}")
 
 
 if __name__ == "__main__":

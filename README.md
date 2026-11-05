@@ -124,6 +124,11 @@ Use a different `--exp_name` (ORCHID/IVF) or `--exp-name` (baselines) to retain
 multiple runs. Reusing a name replaces its CSV files. Resolved configurations
 and adaptive QPS confidence intervals are printed to the terminal.
 
+Set `ORCHID_PRETTY_OUTPUT=1` for labelled ORCHID/IVF console tables with
+CPU/GPU stage labels, actual queries per batch, recall, throughput, and
+median/P95 latency in milliseconds per batch. CSV files retain their existing
+format. A partial batch reports its actual query count rather than the batch limit.
+
 Paper configs use one untimed full-trace warmup, at least three measured traces,
 and up to 100 traces to meet a 5% relative QPS confidence half-width. A sweep
 that does not converge fails before writing completed-sweep CSVs.
