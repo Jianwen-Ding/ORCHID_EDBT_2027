@@ -34,7 +34,7 @@ struct PromiseCapsule {
 };
 
 struct StreamCapsule {
-    cudaEvent_t m_event = nullptr;
+    cudaEvent_t m_streamStartEvent = nullptr;
     cudaStream_t m_stream = nullptr;
 
     void sync();
@@ -45,6 +45,9 @@ struct StreamCapsule {
 struct PromiseData {
     void* m_data = nullptr;
     size_t m_size = 0; // Logical byte count; allocation is aligned.
+
+    // Event that marks the completion of the promise
+    cudaEvent_t m_event = nullptr;
     std::shared_ptr<StreamCapsule> m_stream;
 
     PromiseData(size_t size, std::shared_ptr<StreamCapsule> stream = nullptr);

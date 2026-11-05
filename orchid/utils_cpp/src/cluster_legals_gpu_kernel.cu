@@ -3,6 +3,8 @@
 #include <cub/cub.cuh>
 #include <thrust/scan.h>
 #include <thrust/transform.h>
+#include <thrust/scan.h>
+#include <thrust/reduce.h>
 #include <cooperative_groups.h>
 #include <cooperative_groups/memcpy_async.h>
 
@@ -14,29 +16,22 @@ namespace cg = cooperative_groups;
 #include <stdexcept>
 
 void StreamCapsule::sync() {
-    if (m_event) {
-        checkGpuStatus(cudaEventSynchronize(m_event));
-    } else {
-        checkGpuStatus(cudaStreamSynchronize(m_stream));
-    }
+    checkGpuStatus(cudaStreamSynchronize(m_stream));
 }
 
-StreamCapsule::StreamCapsule() {}
+StreamCapsule::StreamCapsule() {
+    checkGpuStatus(cudaStreamCreate(&m_stream));
+    cudaEventCreate(&m_streamStartEvent);
+    cudaEventRecord(m_streamStartEvent, m_stream);
+}
+
 StreamCapsule::~StreamCapsule() {
-    if (m_event) {
-        cudaEventDestroy(m_event);
-    }
     cudaStreamDestroy(m_stream);
 }
 
 
 // Funnels a number of promises into a single gpu promise
 static std::shared_ptr<StreamCapsule> funnelStreams(const std::vector<std::shared_ptr<StreamCapsule>>& streams) {
-    if (streams.empty()) {
-        auto stream = std::make_shared<StreamCapsule>();
-        checkGpuStatus(cudaStreamCreate(&stream->m_stream));
-        return stream;
-    }
     // TODO: A bit arbitrary might need some specification or something
     // given that only one group of promises is expected for now its fine
     std::shared_ptr<StreamCapsule> extendedStream = streams[0];
@@ -45,29 +40,25 @@ static std::shared_ptr<StreamCapsule> funnelStreams(const std::vector<std::share
     }
     return extendedStream;
 }
-PromiseData::PromiseData(size_t size, std::shared_ptr<StreamCapsule> stream) :
-    m_size(size),
+PromiseData::PromiseData(size_t size, std::shared_ptr<StreamCapsule> stream = nullptr) : 
+    m_size(roundToAlignment(size)),
     m_stream(stream) {
 
     if (!m_stream) {
         m_stream = std::make_shared<StreamCapsule>();
-        checkGpuStatus(cudaStreamCreate(&m_stream->m_stream));
     }
 
     if (m_size != 0) {
-        checkGpuStatus(cudaMallocAsync(&m_data, roundToAlignment(m_size), m_stream->m_stream));
+        checkGpuStatus(cudaMallocAsync(&m_data, m_size, m_stream->m_stream));
     }
 }
 PromiseData::~PromiseData() {
-    cudaFreeAsync(m_data, m_stream->m_stream);
+    cudaFree(m_data);
+    cudaEventDestroy(m_event);
 }
 void PromiseData::finalizePromise() {
-    if (m_stream->m_event) {
-        cudaEventDestroy(m_stream->m_event);
-    }
-    m_stream->m_event = nullptr;
-    checkGpuStatus(cudaEventCreate(&m_stream->m_event));
-    checkGpuStatus(cudaEventRecord(m_stream->m_event, m_stream->m_stream));
+    cudaEventCreate(&m_event);
+    cudaEventRecord(m_event, m_stream->m_stream);
 }
 const void* PromiseData::getData() const {
     return m_data;
@@ -81,8 +72,8 @@ void PromiseData::uploadCpuDataAsync(const void* h_data, size_t size, size_t off
 }
 
 void PromiseData::syncGpuData() {
-    if (m_stream->m_event) {
-        checkGpuStatus(cudaEventSynchronize(m_stream->m_event));
+    if (m_event) {
+        checkGpuStatus(cudaEventSynchronize(m_event));
     } else {
         checkGpuStatus(cudaStreamSynchronize(m_stream->m_stream));
     }
@@ -115,7 +106,7 @@ __global__ void postingListKernel (
     int32_t threadWidth,
     int32_t postingCount) {
     extern __shared__ int64_t d_sharedMem[];
-
+    
     // Sets up shared memory
     auto block = cg::this_thread_block();
     int64_t* d_postingSizesShared = d_sharedMem;
@@ -202,7 +193,7 @@ std::shared_ptr<PromiseData> predicate_results_to_bitmap_gpu_impl(
                 policy, d_postingSizes, d_postingSizes + postingCount,
                 d_postingOffsets, ThreadWidthDivision{1});
             thrust::inclusive_scan(policy, d_postingOffsets, d_postingOffsets + postingCount, d_postingOffsets);
-
+    
             // Sum ceil(size / threadWidth) <= postingCount + floor(entries / threadWidth).
             // The uploaded span provides this bound without copying a scan result to the CPU.
             const int64_t totalThreads = postingCount + postingEntries / threadWidth;
