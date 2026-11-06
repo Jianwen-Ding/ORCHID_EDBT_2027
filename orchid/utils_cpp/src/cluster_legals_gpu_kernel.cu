@@ -63,6 +63,18 @@ void PromiseData::finalizePromise() {
 const void* PromiseData::getData() const {
     return m_data;
 }
+void* PromiseData::getData() {
+    return m_data;
+}
+size_t PromiseData::getSize() const {
+    return m_size;
+}
+void PromiseData::uploadValueAsync(int value, size_t size, size_t offset) {
+    if (size != 0) {
+        void* d_destination = static_cast<uint8_t*>(m_data) + offset;
+        checkGpuStatus(cudaMemsetAsync(d_destination, value, size, m_stream->m_stream));
+    }
+}
 void PromiseData::uploadCpuDataAsync(const void* h_data, size_t size, size_t offset) {
     if (size != 0) {
         void* d_destination = static_cast<uint8_t*>(m_data) + offset;
@@ -71,7 +83,7 @@ void PromiseData::uploadCpuDataAsync(const void* h_data, size_t size, size_t off
     }
 }
 
-void PromiseData::syncGpuData() {
+void PromiseData::syncGpuData() const {
     if (m_event) {
         checkGpuStatus(cudaEventSynchronize(m_event));
     } else {
@@ -170,8 +182,9 @@ std::shared_ptr<PromiseData> predicate_results_to_bitmap_gpu_impl(
     auto extendedPromise = funnelStreams(blockingPromises);
     auto ret = std::make_shared<PromiseData>(totalSize, extendedPromise);
     const cudaStream_t stream = extendedPromise->m_stream;
-    if (ret->m_size) {
-        checkGpuStatus(cudaMemsetAsync(ret->m_data, 0, roundToAlignment(ret->m_size), stream));
+    
+    if (ret->getData()) {
+        ret->uploadValueAsync(0, ret->getSize(), 0);
     }
 
     int64_t* d_postingMetadata = nullptr;
@@ -201,7 +214,7 @@ std::shared_ptr<PromiseData> predicate_results_to_bitmap_gpu_impl(
 
             postingListKernel<<<blocks, 256, metadataBytes, stream>>>(
                 d_postingLists, d_threadCounts, d_postingOffsets, d_postingQueries,
-                static_cast<uint8_t*>(ret->m_data), bytesPerQuery,
+                static_cast<uint8_t*>(ret->getData()), bytesPerQuery,
                 threadWidth, postingCount);
 
             checkGpuStatus(cudaGetLastError());
@@ -211,7 +224,7 @@ std::shared_ptr<PromiseData> predicate_results_to_bitmap_gpu_impl(
         // Run after posting atomics: adjacent rows may share an atomic word.
         for (int32_t i = 0; i < denseMaskCount; ++i) {
             checkGpuStatus(cudaMemcpyAsync(
-                static_cast<uint8_t*>(ret->m_data) + h_denseMaskQueries[i] * bytesPerQuery,
+                static_cast<uint8_t*>(ret->getData()) + h_denseMaskQueries[i] * bytesPerQuery,
                 d_denseMasks + static_cast<int64_t>(i) * bytesPerQuery,
                 bytesPerQuery, cudaMemcpyDeviceToDevice, stream));
         }

@@ -42,24 +42,33 @@ struct StreamCapsule {
     ~StreamCapsule();
 };
 
+// Represents a block of data in the 
 struct PromiseData {
-    void* m_data = nullptr;
-    size_t m_size = 0; // Logical byte count; allocation is aligned.
+private:
+    void* m_data{ nullptr };
+    size_t m_size{ 0 }; // Logical byte count; allocation is aligned.
 
     // Event that marks the completion of the promise
-    cudaEvent_t m_event = nullptr;
-    std::shared_ptr<StreamCapsule> m_stream;
+    cudaEvent_t m_event{ nullptr };
+    std::shared_ptr<StreamCapsule> m_stream{ nullptr };
 
+public:
     PromiseData(size_t size, std::shared_ptr<StreamCapsule> stream = nullptr);
     ~PromiseData();
 
     // Sets an event at the end of the stream.
     void finalizePromise();
 
+    // Getters and setters
     const void* getData() const;
+    void* getData();
+    size_t getSize() const;
+
+
     // Uploads at a byte offset. Caller checks capacity and retains the source until sync.
+    void uploadValueAsync(int value, size_t size, size_t offset);
     void uploadCpuDataAsync(const void* h_data, size_t size, size_t offset);
-    void syncGpuData();
+    void syncGpuData() const;
     PromiseCapsule collectRawCpuCopy();
 };
 
