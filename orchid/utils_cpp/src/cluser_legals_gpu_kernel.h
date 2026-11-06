@@ -37,7 +37,7 @@ struct StreamCapsule {
     cudaEvent_t m_streamStartEvent = nullptr;
     cudaStream_t m_stream = nullptr;
 
-    void sync();
+    void sync() const;
     StreamCapsule();
     ~StreamCapsule();
 };
@@ -50,10 +50,10 @@ private:
 
     // Event that marks the completion of the promise
     cudaEvent_t m_event{ nullptr };
-    std::shared_ptr<StreamCapsule> m_stream{ nullptr };
+    std::shared_ptr<const StreamCapsule> m_stream{ nullptr };
 
 public:
-    PromiseData(size_t size, std::shared_ptr<StreamCapsule> stream = nullptr);
+    PromiseData(size_t size, std::shared_ptr<const StreamCapsule> stream = nullptr);
     ~PromiseData();
 
     // Sets an event at the end of the stream.
@@ -62,6 +62,9 @@ public:
     // Getters and setters
     const void* getData() const;
     void* getData();
+
+    const std::shared_ptr<const StreamCapsule> getStream() const;
+
     size_t getSize() const;
 
 

@@ -3,6 +3,7 @@
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 
+#include <future>
 #include <type_traits>
 #include <algorithm>
 #include <stdexcept> 
@@ -20,6 +21,8 @@
 #if defined(ENABLE_GPU)
 #include "cluser_legals_gpu_kernel.h"
 #endif
+
+// This represents the interface in which python interacts with python programs.
 
 namespace py = pybind11;
 
@@ -60,7 +63,6 @@ public:
     // Gets underlying buffer, assuming it has already been uploaded.
     const GpuBuffer& getBuffer() const;
 };
-
 
 namespace detail {
     // Helper function for adding GPU span
@@ -283,6 +285,14 @@ namespace detail {
 
 // Hidden implementation of Gpu Data
 struct PromiseData;
+struct StreamCapsule;
+
+// Represents 
+struct GpuTimeStamp {
+    // TODO: This sort of locks it into recording the beginning of a stream.
+    // For now this is fine but may need to be extended.
+    std::shared_ptr<StreamCapsule> m_stream;
+};
 
 // Retains the original arrays; no additional host buffer is allocated.
 struct CpuUploadCapsule {
@@ -292,9 +302,8 @@ struct CpuUploadCapsule {
 // A set of Gpu data that may or may not be in transit
 class GpuPromise : public std::enable_shared_from_this<GpuPromise> {
 public:
-
     // Python upload owners are retained until queued copies have completed.
-    CpuUploadCapsule m_uploadSources;
+    std::vector<py::array> m_uploadSources;
 
     // >>> C++/Cuda exclusive <<<
     std::shared_ptr<PromiseData> m_data;
@@ -318,13 +327,13 @@ std::shared_ptr<GpuPromise> uploadToGpu_out_py(py::args args);
 #if defined(ENABLE_GPU)
 
 #include <vector>
-static inline std::vector<std::shared_ptr<StreamCapsule>> gatherPromises(std::vector<const GpuBuffer*> buffers) {
+static inline std::vector<std::shared_ptr<const StreamCapsule>> gatherPromises(std::vector<const GpuBuffer*> buffers) {
     std::vector<std::shared_ptr<StreamCapsule>> ret;
     for (size_t i = 0 ; i < buffers.size() ; i += 1) {
         if (!buffers[i]->m_promise) {
             throw std::runtime_error("Span has not been uploaded to the GPU yet");
         }
-        std::shared_ptr<StreamCapsule> stream = buffers[i]->m_promise->m_data->m_stream;
+        std::shared_ptr<const StreamCapsule> stream = buffers[i]->m_promise->m_data->getStream();
         if (std::find(ret.begin(), ret.end(), stream) == ret.end()) {
             ret.push_back(stream);
         }
@@ -343,8 +352,8 @@ inline GpuPromise::GpuPromise(std::shared_ptr<PromiseData> data) : m_data(std::m
 }
 inline GpuPromise::~GpuPromise() {
     // Stream-ordered device frees do not wait for copies from Python arrays.
-    if (!m_uploadSources.sources.empty() && m_data) {
-        cudaStreamSynchronize(m_data->m_stream->m_stream);
+    if (!m_uploadSources.empty() && m_data) {
+        m_data->syncGpuData();
     }
 }
 template <typename T>
@@ -388,7 +397,7 @@ inline const GpuBuffer& GpuSpan<T>::getBuffer() const {
     return *this;
 }
 inline GpuSpan<uint8_t> GpuPromise::collectBufferAsync() {
-    return GpuSpan<uint8_t>(m_data->m_data, m_data->m_size, shared_from_this());
+    return GpuSpan<uint8_t>(m_data->getData(), m_data->getSize(), shared_from_this());
 }
 inline GpuSpan<uint8_t> GpuPromise::collectBufferSync() {
     m_data->syncGpuData();
@@ -428,9 +437,9 @@ inline std::shared_ptr<GpuPromise> uploadToGpu_out_py(py::args args) {
 
     // Creates a block of data with needed size
     std::shared_ptr<PromiseData> promiseData = std::make_unique<PromiseData>(cumulative_size);
-    void* rawDataIter = promiseData->m_data;
+    void* rawDataIter = promiseData->getData();
     std::shared_ptr<GpuPromise> promise = std::make_shared<GpuPromise>(std::move(promiseData));
-    promise->m_uploadSources.sources.reserve(argLength);
+    promise->m_uploadSources.reserve(argLength);
     size_t uploadOffset = 0;
 
     try {
@@ -438,7 +447,7 @@ inline std::shared_ptr<GpuPromise> uploadToGpu_out_py(py::args args) {
         for (size_t i = 0; i < argLength; ++i) {
             PromiseData& data = *promise->m_data;
             size_t alignedSize = roundToAlignment(dataSizes[i]);
-            if (uploadOffset > data.m_size || alignedSize > data.m_size - uploadOffset) {
+            if (uploadOffset > data.getSize() || alignedSize > data.getSize() - uploadOffset) {
                 throw std::runtime_error("GPU data arena is full");
             }
             GpuBuffer addBuffer{rawDataIter, dataSizes[i], promise};
@@ -448,8 +457,8 @@ inline std::shared_ptr<GpuPromise> uploadToGpu_out_py(py::args args) {
                 // Retain each owner and upload directly, without CPU concatenation.
                 // Source arrays must remain unchanged until upload completion.
                 const size_t bytes = static_cast<size_t>(source.nbytes());
-                promise->m_uploadSources.sources.push_back(std::move(source));
-                data.uploadCpuDataAsync(promise->m_uploadSources.sources.back().data(), bytes, offset);
+                promise->m_uploadSources.push_back(std::move(source));
+                data.uploadCpuDataAsync(promise->m_uploadSources.back().data(), bytes, offset);
                 offset += bytes;
             }
             uploadOffset += alignedSize;

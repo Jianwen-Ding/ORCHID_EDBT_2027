@@ -15,7 +15,7 @@ namespace cg = cooperative_groups;
 #include <limits>
 #include <stdexcept>
 
-void StreamCapsule::sync() {
+void StreamCapsule::sync() const {
     checkGpuStatus(cudaStreamSynchronize(m_stream));
 }
 
@@ -31,21 +31,21 @@ StreamCapsule::~StreamCapsule() {
 
 
 // Funnels a number of promises into a single gpu promise
-static std::shared_ptr<StreamCapsule> funnelStreams(const std::vector<std::shared_ptr<StreamCapsule>>& streams) {
+static std::shared_ptr<const StreamCapsule> funnelStreams(const std::vector<std::shared_ptr<const StreamCapsule>>& streams) {
     // TODO: A bit arbitrary might need some specification or something
     // given that only one group of promises is expected for now its fine
-    std::shared_ptr<StreamCapsule> extendedStream = streams[0];
+    std::shared_ptr<const StreamCapsule> extendedStream = streams[0];
     for (int i = 1 ; i < streams.size() ; i++) {
         streams[i]->sync();
     }
     return extendedStream;
 }
-PromiseData::PromiseData(size_t size, std::shared_ptr<StreamCapsule> stream = nullptr) : 
+PromiseData::PromiseData(size_t size, std::shared_ptr<const StreamCapsule> stream = nullptr) : 
     m_size(roundToAlignment(size)),
     m_stream(stream) {
 
     if (!m_stream) {
-        m_stream = std::make_shared<StreamCapsule>();
+        m_stream = std::make_shared<const StreamCapsule>();
     }
 
     if (m_size != 0) {
@@ -65,6 +65,9 @@ const void* PromiseData::getData() const {
 }
 void* PromiseData::getData() {
     return m_data;
+}
+std::shared_ptr<const StreamCapsule> PromiseData::getStream() const {
+    return m_stream;
 }
 size_t PromiseData::getSize() const {
     return m_size;
@@ -167,7 +170,7 @@ struct ThreadWidthDivision {
 };
 
 std::shared_ptr<PromiseData> predicate_results_to_bitmap_gpu_impl(
-    std::vector<std::shared_ptr<StreamCapsule>> blockingPromises,
+    std::vector<std::shared_ptr<const StreamCapsule>> blockingPromises,
     const uint32_t* d_postingLists,
     const int32_t* d_postingSizes,
     const int32_t* d_postingQueries,
@@ -238,7 +241,7 @@ std::shared_ptr<PromiseData> predicate_results_to_bitmap_gpu_impl(
 
 
 std::shared_ptr<PromiseData> cluster_legals_preordered_packed_gpu_impl (
-    std::vector<std::shared_ptr<StreamCapsule>> blockingPromises,
+    std::vector<std::shared_ptr<const StreamCapsule>> blockingPromises,
     const uint8_t* d_maskPackedBuffer,
     int32_t nQueries,
     int32_t bytesPerQuery,
