@@ -4,6 +4,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <future>
+#include <thread>
 #include <memory>
 #include <stdexcept>
 #include <variant>
@@ -28,11 +30,14 @@ inline size_t roundToAlignment(size_t number) {
     return round(number, GpuAlignment);
 }
 
+// Allows for the creation and deletion of 
+// cuda page host allocation
 struct PromiseCapsule {
     void* ptr;
     std::function<void(void*)> free;
 };
 
+// Owns a cuda stream.
 struct StreamCapsule {
     cudaEvent_t m_streamStartEvent = nullptr;
     cudaStream_t m_stream = nullptr;
@@ -42,8 +47,8 @@ struct StreamCapsule {
     ~StreamCapsule();
 };
 
-// Represents a block of data in the 
-struct PromiseData {
+// Represents a block of data to be completed within the Gpu
+struct GpuPromiseData {
 private:
     void* m_data{ nullptr };
     size_t m_size{ 0 }; // Logical byte count; allocation is aligned.
@@ -53,8 +58,8 @@ private:
     std::shared_ptr<const StreamCapsule> m_stream{ nullptr };
 
 public:
-    PromiseData(size_t size, std::shared_ptr<const StreamCapsule> stream = nullptr);
-    ~PromiseData();
+    GpuPromiseData(size_t size, std::shared_ptr<const StreamCapsule> stream = nullptr);
+    ~GpuPromiseData();
 
     // Sets an event at the end of the stream.
     void finalizePromise();
@@ -63,7 +68,7 @@ public:
     const void* getData() const;
     void* getData();
 
-    const std::shared_ptr<const StreamCapsule> getStream() const;
+    std::shared_ptr<const StreamCapsule> getStream() const;
 
     size_t getSize() const;
 
@@ -73,11 +78,11 @@ public:
     void uploadCpuDataAsync(const void* h_data, size_t size, size_t offset);
     void syncGpuData() const;
     PromiseCapsule collectRawCpuCopy();
+    PromiseCapsule copyToCpu(const void* d_gpuData, size_t size);
 };
 
-PromiseCapsule copyToCpu(const void* d_gpuData, size_t size);
 
-std::shared_ptr<PromiseData> predicate_results_to_bitmap_gpu_impl (
+std::shared_ptr<GpuPromiseData> predicate_results_to_bitmap_gpu_impl (
     std::vector<std::shared_ptr<StreamCapsule>> blockingPromises,
     const uint32_t* d_postingLists,
     const int32_t* d_postingSizes,
@@ -91,7 +96,7 @@ std::shared_ptr<PromiseData> predicate_results_to_bitmap_gpu_impl (
     int64_t postingEntries);
 
 
-std::shared_ptr<PromiseData> cluster_legals_preordered_packed_gpu_impl (
+std::shared_ptr<GpuPromiseData> cluster_legals_preordered_packed_gpu_impl (
     std::vector<std::shared_ptr<StreamCapsule>> blockingPromises,
     const uint8_t* d_maskPackedBuffer,
     int32_t nQueries,

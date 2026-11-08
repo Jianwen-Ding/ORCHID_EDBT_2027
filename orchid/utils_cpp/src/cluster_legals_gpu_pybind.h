@@ -29,7 +29,7 @@ namespace py = pybind11;
 class GpuPromise;
 namespace detail { template <typename... T> class GpuSpanTemplateUtil; }
 
-// A non owning buffer of Gpu data
+// A non owning buffer of Gpu data to be be completed on the Gpu
 class GpuBuffer {
 public:
     void* m_data{ nullptr };
@@ -40,7 +40,7 @@ public:
     GpuBuffer(void* data, size_t size, std::shared_ptr<GpuPromise> promise);
 };
 
-// A typed span of Gpu data
+// A typed span of Gpu data to be completed on the Gpu
 template<typename T>
 class GpuSpan : public GpuBuffer {
     static_assert(std::is_arithmetic<T>::value, "Template parameter T must be a primitive type.");
@@ -62,6 +62,12 @@ public:
     
     // Gets underlying buffer, assuming it has already been uploaded.
     const GpuBuffer& getBuffer() const;
+};
+
+// A typed segment of Cpu potentially in transit from the Gpu
+template<typename T>
+class CpuSpan {
+
 };
 
 namespace detail {
@@ -130,7 +136,8 @@ namespace detail {
             std::vector<py::array> sources;
 
             // Gets a shallow copy if it already is in c style
-            (..., ([&]{
+            (..., ([&]
+  0) Exit{
                 if (!successfulSet && py::isinstance<GpuSpan<typename Entries::type>>(item)) {
                     GpuSpan<typename Entries::type>& span = item.cast<GpuSpan<typename Entries::type>&>();
                     if (span.m_uploaded) {
@@ -284,7 +291,7 @@ namespace detail {
 
 
 // Hidden implementation of Gpu Data
-struct PromiseData;
+struct GpuPromiseData;
 struct StreamCapsule;
 
 // Represents 
@@ -306,9 +313,9 @@ public:
     std::vector<py::array> m_uploadSources;
 
     // >>> C++/Cuda exclusive <<<
-    std::shared_ptr<PromiseData> m_data;
+    std::shared_ptr<GpuPromiseData> m_data;
 
-    GpuPromise(std::shared_ptr<PromiseData> data);
+    GpuPromise(std::shared_ptr<GpuPromiseData> data);
     ~GpuPromise();
     const GpuPromise& operator=(const GpuPromise& promise) = delete;
 
@@ -328,7 +335,7 @@ std::shared_ptr<GpuPromise> uploadToGpu_out_py(py::args args);
 
 #include <vector>
 static inline std::vector<std::shared_ptr<const StreamCapsule>> gatherPromises(std::vector<const GpuBuffer*> buffers) {
-    std::vector<std::shared_ptr<StreamCapsule>> ret;
+    std::vector<std::shared_ptr<const StreamCapsule>> ret;
     for (size_t i = 0 ; i < buffers.size() ; i += 1) {
         if (!buffers[i]->m_promise) {
             throw std::runtime_error("Span has not been uploaded to the GPU yet");
@@ -345,7 +352,7 @@ inline GpuBuffer::GpuBuffer(void* data, size_t size, std::shared_ptr<GpuPromise>
 template <typename T>
 inline GpuSpan<T>::GpuSpan(void* data, size_t size, std::shared_ptr<GpuPromise> promise)
     : GpuBuffer(data, size, std::move(promise)), m_uploaded(true) {}
-inline GpuPromise::GpuPromise(std::shared_ptr<PromiseData> data) : m_data(std::move(data)) {
+inline GpuPromise::GpuPromise(std::shared_ptr<GpuPromiseData> data) : m_data(std::move(data)) {
     if (!m_data) {
         throw std::runtime_error("GPU kernel returned no data");
     }
@@ -436,16 +443,16 @@ inline std::shared_ptr<GpuPromise> uploadToGpu_out_py(py::args args) {
     }
 
     // Creates a block of data with needed size
-    std::shared_ptr<PromiseData> promiseData = std::make_unique<PromiseData>(cumulative_size);
-    void* rawDataIter = promiseData->getData();
-    std::shared_ptr<GpuPromise> promise = std::make_shared<GpuPromise>(std::move(promiseData));
+    std::shared_ptr<GpuPromiseData> GpuPromiseData = std::make_unique<GpuPromiseData>(cumulative_size);
+    void* rawDataIter = GpuPromiseData->getData();
+    std::shared_ptr<GpuPromise> promise = std::make_shared<GpuPromise>(std::move(GpuPromiseData));
     promise->m_uploadSources.reserve(argLength);
     size_t uploadOffset = 0;
 
     try {
         // Begins partitioning data along block of data
         for (size_t i = 0; i < argLength; ++i) {
-            PromiseData& data = *promise->m_data;
+            GpuPromiseData& data = *promise->m_data;
             size_t alignedSize = roundToAlignment(dataSizes[i]);
             if (uploadOffset > data.getSize() || alignedSize > data.getSize() - uploadOffset) {
                 throw std::runtime_error("GPU data arena is full");
@@ -476,7 +483,7 @@ inline std::shared_ptr<GpuPromise> uploadToGpu_out_py(py::args args) {
     return promise;
 }
 
-inline GpuSpan<uint8_t> predicate_results_to_bitmap_gpu_out_py (
+inline GpuSpan<uint8_t> predicateResultsToBitmapGpu_out_py (
     const GpuSpan<uint32_t> posting_lists,
     const GpuSpan<int32_t> posting_sizes,
     const GpuSpan<int32_t> posting_queries,
@@ -563,12 +570,12 @@ inline GpuSpan<float> cluster_legals_preordered_packed_gpu_out_py (
 
 // If Gpu logic is not support it should throw on any GPU specific logic 
 // that attempts to be called. 
-struct PromiseData { };
+struct GpuPromiseData { };
 
 inline GpuBuffer::GpuBuffer(void* data, size_t size, std::shared_ptr<GpuPromise> promise) {
     throw std::runtime_error("GPU backend not compiled");
 }
-inline GpuPromise::GpuPromise(std::shared_ptr<PromiseData> data) {
+inline GpuPromise::GpuPromise(std::shared_ptr<GpuPromiseData> data) {
     throw std::runtime_error("GPU backend not compiled");
 }
 inline GpuPromise::~GpuPromise() = default;
@@ -593,7 +600,7 @@ inline std::shared_ptr<GpuPromise> uploadToGpu_out_py(py::args args) {
     throw std::runtime_error("GPU backend not compiled");
 }
 
-inline GpuSpan<uint8_t> predicate_results_to_bitmap_gpu_out_py (
+inline GpuSpan<uint8_t> predicateResultsToBitmapGpu_out_py (
     const GpuSpan<uint32_t> posting_lists,
     const GpuSpan<int32_t> posting_sizes,
     const GpuSpan<int32_t> posting_queries,
@@ -629,7 +636,7 @@ inline void addGpuModule(py::module_ &m) {
     detail::SpanUtil::addAllSupportedGpuSpan(m);
     m.def("gpu_prep", &gpuPrep_out_py, py::arg("item"));
     m.def("upload_to_gpu", &uploadToGpu_out_py);
-    m.def("predicate_results_to_bitmap", &predicate_results_to_bitmap_gpu_out_py,
+    m.def("predicate_results_to_bitmap", &predicateResultsToBitmapGpu_out_py,
           py::arg("posting_lists"), py::arg("posting_sizes"), py::arg("posting_queries"),
           py::arg("dense_masks"), py::arg("dense_mask_queries"),
           py::arg("n_queries"), py::arg("n_docs"));
