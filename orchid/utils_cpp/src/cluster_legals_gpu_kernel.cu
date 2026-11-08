@@ -14,6 +14,7 @@ namespace cg = cooperative_groups;
 #include <algorithm>
 #include <limits>
 #include <stdexcept>
+#include <utility>
 
 void StreamCapsule::sync() const {
     checkGpuStatus(cudaStreamSynchronize(m_stream));
@@ -40,36 +41,72 @@ static std::shared_ptr<const StreamCapsule> funnelStreams(const std::vector<std:
     }
     return extendedStream;
 }
-GpuPromiseData::GpuPromiseData(size_t size, std::shared_ptr<const StreamCapsule> stream = nullptr) : 
-    m_size(roundToAlignment(size)),
-    m_stream(stream) {
-
+PromiseData::PromiseData(std::shared_ptr<const StreamCapsule> stream)
+    : m_stream(std::move(stream)) {
     if (!m_stream) {
         m_stream = std::make_shared<const StreamCapsule>();
     }
+}
+
+PromiseData::PromiseData(PromiseData&& other) noexcept
+    : m_data(std::exchange(other.m_data, nullptr)),
+      m_size(std::exchange(other.m_size, 0)),
+      m_event(std::exchange(other.m_event, nullptr)),
+      m_stream(std::move(other.m_stream)) {}
+
+PromiseData::~PromiseData() {
+    if (m_event) {
+        cudaEventDestroy(m_event);
+    }
+}
+
+ReadbackPromiseData::ReadbackPromiseData(size_t size, std::shared_ptr<const StreamCapsule> stream)
+    : PromiseData(std::move(stream)) {
+    m_size = size;
+    if (m_size != 0) {
+        checkGpuStatus(cudaMallocHost(&m_data, roundToAlignment(m_size)));
+    }
+}
+
+ReadbackPromiseData::~ReadbackPromiseData() {
+    if (m_data) {
+        cudaFreeHost(m_data);
+    }
+}
+
+void ReadbackPromiseData::uploadGpuDataAsync(const void* d_data, size_t size, size_t offset) {
+    if (size != 0) {
+        void* h_destination = static_cast<uint8_t*>(m_data) + offset;
+        checkGpuStatus(cudaMemcpyAsync(h_destination, d_data, size,
+                                       cudaMemcpyDeviceToHost, m_stream->m_stream));
+    }
+}
+
+GpuPromiseData::GpuPromiseData(size_t size, std::shared_ptr<const StreamCapsule> stream)
+    : PromiseData(std::move(stream)) {
+    m_size = size;
 
     if (m_size != 0) {
-        checkGpuStatus(cudaMallocAsync(&m_data, m_size, m_stream->m_stream));
+        checkGpuStatus(cudaMallocAsync(&m_data, roundToAlignment(m_size), m_stream->m_stream));
     }
 }
 GpuPromiseData::~GpuPromiseData() {
     cudaFree(m_data);
-    cudaEventDestroy(m_event);
 }
-void GpuPromiseData::finalizePromise() {
+void PromiseData::finalizePromise() {
     cudaEventCreate(&m_event);
     cudaEventRecord(m_event, m_stream->m_stream);
 }
-const void* GpuPromiseData::getData() const {
+const void* PromiseData::getData() const {
     return m_data;
 }
-void* GpuPromiseData::getData() {
+void* PromiseData::getData() {
     return m_data;
 }
-std::shared_ptr<const StreamCapsule> GpuPromiseData::getStream() const {
+std::shared_ptr<const StreamCapsule> PromiseData::getStream() const {
     return m_stream;
 }
-size_t GpuPromiseData::getSize() const {
+size_t PromiseData::getSize() const {
     return m_size;
 }
 void GpuPromiseData::uploadValueAsync(int value, size_t size, size_t offset) {
@@ -86,7 +123,7 @@ void GpuPromiseData::uploadCpuDataAsync(const void* h_data, size_t size, size_t 
     }
 }
 
-void GpuPromiseData::syncGpuData() const {
+void PromiseData::sync() const {
     if (m_event) {
         checkGpuStatus(cudaEventSynchronize(m_event));
     } else {
@@ -94,20 +131,19 @@ void GpuPromiseData::syncGpuData() const {
     }
 }
 
-PromiseCapsule GpuPromiseData::collectRawCpuCopy() {
-    syncGpuData();
-    return copyToCpu(m_data, m_size);
+std::shared_ptr<const ReadbackPromiseData> GpuPromiseData::collectRawCpuCopy() const {
+    std::shared_ptr<ReadbackPromiseData> result = std::make_shared<ReadbackPromiseData>(m_size, m_stream);
+    result->uploadGpuDataAsync(m_data, m_size, 0);
+    result->finalizePromise();
+    return result;
 }
 
-PromiseCapsule copyToCpu(const void* d_gpuData, size_t size) {
-    void* h_cpuPtr = nullptr;
-    checkGpuStatus(cudaMallocHost(&h_cpuPtr, size == 0 ? 1 : size));
-    cudaError_t status = cudaMemcpy(h_cpuPtr, d_gpuData, size, cudaMemcpyDeviceToHost);
-    if (status != cudaSuccess) {
-        cudaFreeHost(h_cpuPtr);
-        checkGpuStatus(status);
-    }
-    return {h_cpuPtr, [](void* h_raw) { cudaFreeHost(h_raw); }};
+
+std::shared_ptr<const ReadbackPromiseData> GpuPromiseData::copyToCpu(const void* d_gpuData, size_t size) const {
+    std::shared_ptr<ReadbackPromiseData> result = std::make_shared<ReadbackPromiseData>(size, m_stream);
+    result->uploadGpuDataAsync(d_gpuData, size, 0);
+    result->finalizePromise();
+    return result;
 }
 
 // Assigns each thread a chunk of one posting list.

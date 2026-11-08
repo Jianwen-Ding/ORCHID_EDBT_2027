@@ -47,9 +47,9 @@ struct StreamCapsule {
     ~StreamCapsule();
 };
 
-// Represents a block of data to be completed within the Gpu
-struct GpuPromiseData {
-private:
+// Represents a block of data held up before a cuda event.
+struct PromiseData {
+protected:
     void* m_data{ nullptr };
     size_t m_size{ 0 }; // Logical byte count; allocation is aligned.
 
@@ -57,33 +57,54 @@ private:
     cudaEvent_t m_event{ nullptr };
     std::shared_ptr<const StreamCapsule> m_stream{ nullptr };
 
+    PromiseData(std::shared_ptr<const StreamCapsule> stream);
+    ~PromiseData();
+
 public:
-    GpuPromiseData(size_t size, std::shared_ptr<const StreamCapsule> stream = nullptr);
-    ~GpuPromiseData();
+    PromiseData(const PromiseData&) = delete;
+    PromiseData& operator=(const PromiseData&) = delete;
 
     // Sets an event at the end of the stream.
     void finalizePromise();
 
     // Getters and setters
+    std::shared_ptr<const StreamCapsule> getStream() const;
+    size_t getSize() const;
     const void* getData() const;
     void* getData();
 
-    std::shared_ptr<const StreamCapsule> getStream() const;
+    // Forces event to be synced
+    void sync() const;
+};
 
-    size_t getSize() const;
+// Owns pinned Cpu data that may be in transit from the Gpu.
+class ReadbackPromiseData : public PromiseData {
+public:
+    ReadbackPromiseData(size_t size, std::shared_ptr<const StreamCapsule> stream = nullptr);
+    ~ReadbackPromiseData();
 
-
-    // Uploads at a byte offset. Caller checks capacity and retains the source until sync.
-    void uploadValueAsync(int value, size_t size, size_t offset);
-    void uploadCpuDataAsync(const void* h_data, size_t size, size_t offset);
-    void syncGpuData() const;
-    PromiseCapsule collectRawCpuCopy();
-    PromiseCapsule copyToCpu(const void* d_gpuData, size_t size);
+    // Caller checks capacity and retains d_data until the copy completes.
+    void uploadGpuDataAsync(const void* d_data, size_t size, size_t offset);
 };
 
 
+// Represents a block of data to be completed within the Gpu
+class GpuPromiseData : public PromiseData {
+public:
+    GpuPromiseData(size_t size, std::shared_ptr<const StreamCapsule> stream = nullptr);
+    ~GpuPromiseData();
+
+    void uploadValueAsync(int value, size_t size, size_t offset);
+    // Up to caller to retain data within h_data until data has been fully copied in
+    void uploadCpuDataAsync(const void* h_data, size_t size, size_t offset);
+    // Returns a completed CPU copy.
+    std::shared_ptr<const ReadbackPromiseData> collectRawCpuCopy() const;
+    // Copies a portion of the gpu data within bounds to cpu
+    std::shared_ptr<const ReadbackPromiseData> copyToCpu(const void* d_gpuData, size_t size) const;
+};
+
 std::shared_ptr<GpuPromiseData> predicate_results_to_bitmap_gpu_impl (
-    std::vector<std::shared_ptr<StreamCapsule>> blockingPromises,
+    std::vector<std::shared_ptr<const StreamCapsule>> blockingPromises,
     const uint32_t* d_postingLists,
     const int32_t* d_postingSizes,
     const int32_t* d_postingQueries,
@@ -97,7 +118,7 @@ std::shared_ptr<GpuPromiseData> predicate_results_to_bitmap_gpu_impl (
 
 
 std::shared_ptr<GpuPromiseData> cluster_legals_preordered_packed_gpu_impl (
-    std::vector<std::shared_ptr<StreamCapsule>> blockingPromises,
+    std::vector<std::shared_ptr<const StreamCapsule>> blockingPromises,
     const uint8_t* d_maskPackedBuffer,
     int32_t nQueries,
     int32_t bytesPerQuery,
