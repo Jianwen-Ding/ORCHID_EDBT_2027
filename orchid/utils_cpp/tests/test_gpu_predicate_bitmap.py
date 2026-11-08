@@ -8,7 +8,7 @@ import numpy as np
 from utils_cpp import gpu
 
 
-class GpuPredicateBitmapTest(unittest.TestCase):
+class GpuPredicateBitmapTest(unittest.IsolatedAsyncioTestCase):
     def upload(self, values, separate_uploads=False):
         try:
             spans = [gpu.gpu_prep(value) for value in values]
@@ -23,7 +23,7 @@ class GpuPredicateBitmapTest(unittest.TestCase):
             raise
         return spans
 
-    def check_batch(self, postings, posting_queries, masks, mask_queries, n_docs,
+    async def check_batch(self, postings, posting_queries, masks, mask_queries, n_docs,
                     separate_uploads=False):
         n_queries = len(postings) + len(masks)
         width = (n_docs + 7) // 8
@@ -43,58 +43,58 @@ class GpuPredicateBitmapTest(unittest.TestCase):
         spans = self.upload(values, separate_uploads)
         # Reusing the exact metadata catches accidental in-place prefix scans.
         for _ in range(2):
-            result = gpu.predicate_results_to_bitmap(
+            result, _ = gpu.predicate_results_to_bitmap(
                 *spans, np.asarray(mask_queries, dtype=np.int64), n_queries, n_docs)
-            actual = result.collect_to_cpu()
+            actual = await result.collect_to_cpu()
             self.assertEqual(actual.size, n_queries * width)
             np.testing.assert_array_equal(actual.reshape(n_queries, width), expected)
-        np.testing.assert_array_equal(spans[1].collect_to_cpu(), values[1])
+        np.testing.assert_array_equal(await spans[1].collect_to_cpu(), values[1])
 
-    def test_mixed_reordered_queries_with_unaligned_rows(self):
-        self.check_batch(
+    async def test_mixed_reordered_queries_with_unaligned_rows(self):
+        await self.check_batch(
             [[0, 7, 8, 18] * 300, [], [1, 2, 3, 4, 5, 6, 17] * 100],
             [3, 0, 2], [np.array([0x81, 0x40, 0x04], np.uint8)], [1], 19,
             separate_uploads=True,
         )
 
-    def test_posting_only_word_and_block_boundaries(self):
+    async def test_posting_only_word_and_block_boundaries(self):
         for n_docs in [1, 7, 8, 9, 31, 32, 33, 257, 4097]:
             with self.subTest(n_docs=n_docs):
-                self.check_batch(
+                await self.check_batch(
                     [np.arange(n_docs, dtype=np.uint32)[::-1], [], [0, n_docs - 1]],
                     [2, 1, 0], [], [], n_docs,
                 )
 
-    def test_dense_only_preserves_bytes_and_query_order(self):
-        self.check_batch([], [], [np.array([255, 3, 0], np.uint8),
+    async def test_dense_only_preserves_bytes_and_query_order(self):
+        await self.check_batch([], [], [np.array([255, 3, 0], np.uint8),
                                  np.array([0, 0, 255], np.uint8)], [1, 0], 19)
 
-    def test_posting_chunk_and_query_boundaries(self):
+    async def test_posting_chunk_and_query_boundaries(self):
         sizes = [0, 1, 127, 128, 129, 0, 255, 256, 257, 0]
         postings = [(np.arange(size, dtype=np.uint32) * 7 + query) % 4097
                     for query, size in enumerate(sizes)]
-        self.check_batch(postings, list(reversed(range(len(sizes)))), [], [], 4097)
+        await self.check_batch(postings, list(reversed(range(len(sizes)))), [], [], 4097)
 
-    def test_single_posting_list_spans_blocks(self):
-        self.check_batch([np.arange(65537, dtype=np.uint32)], [0], [], [], 65537)
+    async def test_single_posting_list_spans_blocks(self):
+        await self.check_batch([np.arange(65537, dtype=np.uint32)], [0], [], [], 65537)
 
-    def test_empty_batch(self):
-        self.check_batch([], [], [], [], 19)
+    async def test_empty_batch(self):
+        await self.check_batch([], [], [], [], 19)
 
-    def test_many_queries_with_empty_postings(self):
-        self.check_batch([[], [0]] * 1000, list(range(2000)), [], [], 1)
+    async def test_many_queries_with_empty_postings(self):
+        await self.check_batch([[], [0]] * 1000, list(range(2000)), [], [], 1)
 
-    def test_temporary_uploads_on_same_stream(self):
+    async def test_temporary_uploads_on_same_stream(self):
         def materialize():
             spans = self.upload([
                 np.arange(4097, dtype=np.uint32), np.array([4097], np.int32),
                 np.array([0], np.int32), np.empty(0, np.uint8),
             ])
             return gpu.predicate_results_to_bitmap(*spans, np.empty(0, np.int64), 1, 4097)
-        result = materialize()
+        result, _ = materialize()
         gc.collect()
         expected = np.packbits(np.ones(4097, np.uint8), bitorder="little")
-        np.testing.assert_array_equal(result.collect_to_cpu(), expected)
+        np.testing.assert_array_equal(await result.collect_to_cpu(), expected)
 
 
 if __name__ == "__main__":

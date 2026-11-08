@@ -1,5 +1,6 @@
 """GPU readiness checks run with mocked devices and real bitmap result types."""
 
+import asyncio
 import importlib.util
 import unittest
 from pathlib import Path
@@ -14,7 +15,7 @@ probe = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(probe)
 
 
-class SiftGpuProbeTest(unittest.TestCase):
+class SiftGpuProbeTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.options = SimpleNamespace()
         self.faiss = SimpleNamespace(
@@ -26,42 +27,48 @@ class SiftGpuProbeTest(unittest.TestCase):
             INDICES_64_BIT=0,
         )
         self.span = Mock()
-        self.span.collect_to_cpu.return_value = np.array(
+        self.cpu_result = np.array(
             [1, 1, 4, 2, 128, 0], dtype=np.uint8
         )
+        def collect():
+            loop = asyncio.get_running_loop()
+            future = loop.create_future()
+            loop.call_soon(future.set_result, self.cpu_result)
+            return future
+        self.span.collect_to_cpu.side_effect = collect
 
-    def test_rejects_cpu_only_faiss(self):
+    async def test_rejects_cpu_only_faiss(self):
         with (
             patch.dict("sys.modules", {"faiss": SimpleNamespace()}),
             self.assertRaisesRegex(RuntimeError, "FAISS is CPU-only"),
         ):
-            probe.probe_gpu()
+            await probe.probe_gpu()
 
-    def test_rejects_host_without_visible_gpu(self):
+    async def test_rejects_host_without_visible_gpu(self):
         self.faiss.get_num_gpus.return_value = 0
         with (
             patch.dict("sys.modules", {"faiss": self.faiss}),
             self.assertRaisesRegex(RuntimeError, "no CUDA GPU"),
         ):
-            probe.probe_gpu()
+            await probe.probe_gpu()
         self.faiss.StandardGpuResources.assert_not_called()
 
-    def test_rejects_failed_gpu_clone(self):
+    async def test_rejects_failed_gpu_clone(self):
         self.faiss.index_cpu_to_gpu.side_effect = RuntimeError("clone failed")
         with (
             patch.dict("sys.modules", {"faiss": self.faiss}),
             self.assertRaisesRegex(RuntimeError, "clone failed"),
         ):
-            probe.probe_gpu()
+            await probe.probe_gpu()
 
-    def test_exercises_gpu_clone_and_mixed_bitmap_results(self):
+    async def test_exercises_gpu_clone_and_mixed_bitmap_results(self):
         with (
             patch.dict("sys.modules", {"faiss": self.faiss}),
             patch(
-                "predicate_index.materialize_results_gpu", return_value=self.span
+                "predicate_index.materialize_results_gpu", return_value=(self.span, None)
             ) as materialize,
         ):
-            probe.probe_gpu()
+            await probe.probe_gpu()
         self.assertEqual(self.options.indicesOptions, self.faiss.INDICES_64_BIT)
         self.assertFalse(self.options.use_cuvs)
         self.faiss.index_cpu_to_gpu.assert_called_once_with(
@@ -76,17 +83,17 @@ class SiftGpuProbeTest(unittest.TestCase):
         np.testing.assert_array_equal(results[1].bits, [2, 128, 0])
         self.span.collect_to_cpu.assert_called_once_with()
 
-    def test_rejects_incorrect_gpu_materialization(self):
-        self.span.collect_to_cpu.return_value = np.zeros(6, dtype=np.uint8)
+    async def test_rejects_incorrect_gpu_materialization(self):
+        self.cpu_result = np.zeros(6, dtype=np.uint8)
         with (
             patch.dict("sys.modules", {"faiss": self.faiss}),
-            patch("predicate_index.materialize_results_gpu", return_value=self.span),
+            patch("predicate_index.materialize_results_gpu", return_value=(self.span, None)),
             self.assertRaises(AssertionError),
         ):
-            probe.probe_gpu()
+            await probe.probe_gpu()
 
 
-    def test_identifies_utils_cpp_kernel_image_failure(self):
+    async def test_identifies_utils_cpp_kernel_image_failure(self):
         with (
             patch.dict("sys.modules", {"faiss": self.faiss}),
             patch(
@@ -97,7 +104,7 @@ class SiftGpuProbeTest(unittest.TestCase):
                 RuntimeError, r"utils_cpp GPU mask.*NoKernelImage.*menu 12"
             ),
         ):
-            probe.probe_gpu()
+            await probe.probe_gpu()
 
 
 class CudaArchitecturesTest(unittest.TestCase):

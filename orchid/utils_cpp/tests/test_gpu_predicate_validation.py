@@ -8,6 +8,22 @@ from utils_cpp import gpu
 
 
 class GpuPredicateValidationTest(unittest.TestCase):
+    def test_span_size_counts_elements(self):
+        for dtype in (np.uint8, np.uint32, np.int32, np.int64, np.float32):
+            for values in (np.empty(0, dtype), np.arange(6, dtype=dtype).reshape(2, 3),
+                           [np.arange(3, dtype=dtype), np.arange(2, dtype=dtype)]):
+                with self.subTest(dtype=dtype, values=values):
+                    expected = sum(value.size for value in values) if isinstance(values, list) else values.size
+                    try:
+                        span = gpu.gpu_prep(values)
+                        self.assertEqual(span.size, expected)
+                        promise = gpu.upload_to_gpu(span)
+                    except RuntimeError as error:
+                        if "GPU backend not compiled" in str(error):
+                            self.skipTest("GPU backend not compiled")
+                        raise
+                    self.assertEqual(span.size, expected)
+
     def uploaded_inputs(self, **changes):
         values = dict(
             posting_lists=np.array([1, 3], dtype=np.uint32),

@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # ruff: noqa: E402
 import argparse
+import asyncio
 from functools import cache
 import os
 from pathlib import Path
@@ -34,7 +35,7 @@ from perf_results import (
     recall_at_k,
     require_iteration_agreement,
     require_measurement_convergence,
-    run_measured_iterations,
+    run_measured_iterations_async,
     summarize_timings,
     write_timing_results,
     write_sweep_results,
@@ -240,7 +241,7 @@ def parse_args() -> tuple[BuildIvfConfig, DatasetConfig]:
     )
 
 
-def main():
+async def main():
     args, dataset = parse_args()
     timing_stages = CLUSTER_TIMING_STAGES
     debug = bool(os.getenv("PERF_DEBUG"))
@@ -522,7 +523,7 @@ def main():
             )
             return torch.from_numpy(rankings)
 
-        def execute_trace(*, record: bool) -> None:
+        async def execute_trace(*, record: bool) -> None:
             for i, rows in enumerate(batches):
                 qi = queries[rows]
                 size = len(qi)
@@ -537,8 +538,8 @@ def main():
                 stage_start = perf_counter()
                 # Create GPU Alternative here (Id -> Bitmap )
                 if use_gpu:
-                    mi = materialize_results_gpu(predicate_results, n)
-                    mi = mi.collect_to_cpu().reshape(size, bytes_per_query)
+                    mi, stamp = materialize_results_gpu(predicate_results, n)
+                    mi = (await mi.collect_to_cpu()).reshape(size, bytes_per_query)
                 else:
                     mi = materialize_results(
                         predicate_results, n, predicate_bitmap[:size], threads=0
@@ -638,7 +639,7 @@ def main():
                         accounted_components + [other_time, batch_total_time]
                     )
 
-        measurement = run_measured_iterations(
+        measurement = await run_measured_iterations_async(
             lambda record: execute_trace(record=record),
             warmup=warmup,
             iterations=iters,
@@ -742,4 +743,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

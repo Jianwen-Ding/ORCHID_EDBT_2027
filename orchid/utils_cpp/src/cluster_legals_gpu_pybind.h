@@ -26,7 +26,7 @@
 // Any actual cuda semantics should stay out of this file.
 
 namespace py = pybind11;
-typedef PyFuture;
+using PyFuture = py::object;
 
 class GpuPromise;
 namespace detail { template <typename... T> class SpanTemplateUtil; }
@@ -53,7 +53,7 @@ class GpuSpan : public GpuBuffer {
     template <typename...> friend class detail::SpanTemplateUtil;
 public:
     GpuSpan() = default;
-    GpuSpan(void* data, size_t size, std::shared_ptr<GpuPromise> promise);
+    GpuSpan(void* data, size_t elementCount, std::shared_ptr<GpuPromise> promise);
 
     // Pybind API
     PyFuture collectToCpu() const;
@@ -96,7 +96,7 @@ namespace detail {
     public:
         // Gpu Span upload information
 
-        // Sizes a single gpu span
+        // Returns the byte count needed to upload a single GPU span.
         static size_t getSpanSizesForUpload(py::handle item) {
             bool isSupportedSpan = false;
             size_t accumulatedSize = 0;
@@ -125,12 +125,12 @@ namespace detail {
             return accumulatedSize;
         }
 
-        // Attaches the GPU buffer and returns its CPU upload sources.
-        static std::vector<py::array> setSpanBuffer(py::handle item, GpuBuffer&& buffer) {
+        // Attaches GPU storage without changing the span's element count.
+        static std::vector<py::array> setSpanBuffer(
+            py::handle item, void* data, std::shared_ptr<GpuPromise> promise) {
             bool successfulSet = false;
             std::vector<py::array> sources;
 
-            // Gets a shallow copy if it already is in c style
             (..., ([&]{
                 if (!successfulSet && py::isinstance<GpuSpan<typename Entries::type>>(item)) {
                     GpuSpan<typename Entries::type>& span = item.cast<GpuSpan<typename Entries::type>&>();
@@ -142,7 +142,8 @@ namespace detail {
                         sources.push_back(std::move(source));
                     }
                     span.m_cpuInformation.clear();
-                    static_cast<GpuBuffer&>(span) = std::move(buffer);
+                    span.m_data = data;
+                    span.m_promise = std::move(promise);
                     span.m_uploaded = true;
                     successfulSet = true;
                 }
@@ -217,6 +218,7 @@ namespace detail {
                         if (!ptr) {
                             throw std::runtime_error("All vectors in a GPU span must have the same dtype");
                         }
+                        retSpan.m_size += static_cast<size_t>(ptr->size());
                         retSpan.m_cpuInformation.push_back(std::move(*ptr));
                     }
                     result = py::cast(std::move(retSpan));
@@ -331,34 +333,42 @@ std::shared_ptr<GpuPromise> uploadToGpu_out_py(py::args args);
 #include <vector>
 namespace detail {
     // Takes a non owning pointer and creates python object
-    typedef std::function<py::object(void*, size_t)> BufferProcessor;
+    typedef std::function<py::object(const void*, size_t)> BufferProcessor;
     // Creates python future from in transit cpu data
-    inline py::object makeReadbackFuture(std::shared_ptr<ReadbackPromiseData> data, BufferProcessor processor) {
+    inline PyFuture makeReadbackFuture(std::shared_ptr<const ReadbackPromiseData> data, BufferProcessor processor) {
         py::object loop = py::module_::import("asyncio").attr("get_running_loop")();
-        py::object fut  = loop.attr("create_future")();
+        PyFuture fut  = loop.attr("create_future")();
 
-        auto* state = new std::pair<py::object, py::object>(loop, fut);
+        auto* state = new std::pair<py::object, PyFuture>(loop, fut);
 
         std::thread([data, processor, state] {
             data->sync();
-            py::gil_scoped_acquire gil;
-            auto& [loop, fut] = *state;
-            loop.attr("call_soon_threadsafe")(fut.attr("set_result"), processor(data->getData()));
-            delete state;   
+            {
+                py::gil_scoped_acquire gil;
+                auto& [loop, fut] = *state;
+                loop.attr("call_soon_threadsafe")(fut.attr("set_result"), processor(data->getData(), data->getSize()));
+                delete state;
+            }
         }).detach();
 
         return fut;
     }
 
     template<typename T>
-    py::object convertSpanData(void* buffer, size_t size) {
+    py::object convertSpanData(const void* buffer, size_t size) {
+        if (size % sizeof(T) != 0) {
+            throw std::runtime_error("Data size is not a multiple of the size of the type.");
+        }
         return py::array_t<T, py::array::c_style>(
-            static_cast<py::ssize_t>(size),
+            static_cast<py::ssize_t>(size / sizeof(T)),
             static_cast<const T*>(buffer));  
     }
 
     template<typename T>
-    py::object convertData(void* buffer, size_t size) {
+    py::object convertData(const void* buffer, size_t size) {
+        if (size != sizeof(T)) {
+            throw std::runtime_error("Data is wrong size for type.");
+        }
         T value;
         std::memcpy(&value, buffer, sizeof(T));
         return py::cast(value);
@@ -404,23 +414,11 @@ PyFuture GpuSpan<T>::collectToCpu() const {
         throw std::runtime_error("Span not given valid data");
     }
 
-    const size_t rawDataSize = m_size;
-
-    if (rawDataSize % sizeof(T) != 0) {
-        throw std::runtime_error("Buffer size is not divisible by sizeof(T)");
-    }
-
     if (!m_promise) {
         throw std::runtime_error("Span has no GPU promise");
     }
-    
-    detail::makeReadbackFuture(detail::convertSpanData<T>( ));
-
-    return py::array_t<T, py::array::c_style | py::array::forcecast>(
-            { static_cast<py::ssize_t>(rawDataSize / sizeof(T)) },      // shape
-            { static_cast<py::ssize_t>(sizeof(T)) }, // strides in bytes
-            static_cast<T*>(cpuData),
-            rawData);
+    auto readback = m_promise->m_data->copyToCpu(m_data, m_size * sizeof(T));
+    return detail::makeReadbackFuture(readback, detail::convertSpanData<T>);
 }
 template <typename T>
 inline const GpuBuffer& GpuSpan<T>::getBuffer() const {
@@ -483,8 +481,7 @@ inline std::shared_ptr<GpuPromise> uploadToGpu_out_py(py::args args) {
             if (uploadOffset > data.getSize() || alignedSize > data.getSize() - uploadOffset) {
                 throw std::runtime_error("GPU data arena is full");
             }
-            GpuBuffer addBuffer{rawDataIter, dataSizes[i], promise};
-            auto sources = detail::SpanUtil::setSpanBuffer(dataHandles[i], std::move(addBuffer));
+            auto sources = detail::SpanUtil::setSpanBuffer(dataHandles[i], rawDataIter, promise);
             size_t offset = uploadOffset;
             for (auto& source : sources) {
                 // Retain each owner and upload directly, without CPU concatenation.
@@ -509,7 +506,7 @@ inline std::shared_ptr<GpuPromise> uploadToGpu_out_py(py::args args) {
     return promise;
 }
 
-inline std::pair<GpuSpan<uint8_t>, py::object> predicateResultsToBitmapGpu_out_py (
+inline std::pair<GpuSpan<uint8_t>, PyFuture> predicateResultsToBitmapGpu_out_py (
     const GpuSpan<uint32_t> posting_lists,
     const GpuSpan<int32_t> posting_sizes,
     const GpuSpan<int32_t> posting_queries,
@@ -521,21 +518,18 @@ inline std::pair<GpuSpan<uint8_t>, py::object> predicateResultsToBitmapGpu_out_p
     if (n_docs <= 0) throw py::value_error("n_docs must be positive");
     const int32_t bytes_per_query = n_docs / 8 + (n_docs % 8 != 0);
 
-    // Span sizes are in bytes. Check metadata without downloading GPU contents.
-    const auto elementCount = [](const auto& span, size_t elementSize, const char* name) {
+    // Span sizes count elements. Check metadata without downloading GPU contents.
+    const auto elementCount = [](const auto& span, const char* name) {
         const auto& buffer = span.getBuffer();
         if (!buffer.m_promise || (buffer.m_size != 0 && buffer.m_data == nullptr)) {
             throw py::value_error(std::string(name) + " must have a valid uploaded buffer");
         }
-        if (buffer.m_size % elementSize != 0) {
-            throw py::value_error(std::string(name) + " byte size is not divisible by its element size");
-        }
-        return buffer.m_size / elementSize;
+        return buffer.m_size;
     };
-    const size_t posting_count = elementCount(posting_lists, sizeof(uint32_t), "posting_lists");
-    const size_t size_count = elementCount(posting_sizes, sizeof(int32_t), "posting_sizes");
-    const size_t posting_query_count = elementCount(posting_queries, sizeof(int32_t), "posting_queries");
-    const size_t mask_bytes = elementCount(dense_masks, sizeof(uint8_t), "dense_masks");
+    const size_t posting_count = elementCount(posting_lists, "posting_lists");
+    const size_t size_count = elementCount(posting_sizes, "posting_sizes");
+    const size_t posting_query_count = elementCount(posting_queries, "posting_queries");
+    const size_t mask_bytes = elementCount(dense_masks, "dense_masks");
     if (dense_mask_queries.ndim() != 1) {
         throw py::value_error("dense_mask_queries must be one-dimensional");
     }
@@ -570,10 +564,10 @@ inline std::pair<GpuSpan<uint8_t>, py::object> predicateResultsToBitmapGpu_out_p
         n_queries, bytes_per_query,
         static_cast<int32_t>(posting_query_count), static_cast<int32_t>(mask_query_count),
         static_cast<int64_t>(posting_count)));
-    return result->collectBufferAsync();
+    return {result->collectBufferAsync(), py::none()};
 }
 
-inline GpuSpan<float> cluster_legals_preordered_packed_gpu_out_py (
+inline std::pair<GpuSpan<float>, PyFuture> cluster_legals_preordered_packed_gpu_out_py (
     const GpuSpan<uint8_t> mask_packed_buffer,
     int32_t n_queries,
     int32_t bytes_per_query,
@@ -589,7 +583,7 @@ inline GpuSpan<float> cluster_legals_preordered_packed_gpu_out_py (
         static_cast<const int32_t*>(cluster_offsets.getBuffer().m_data), 
         static_cast<const int32_t*>(cluster_counts.getBuffer().m_data), 
         n_list));
-    return GpuSpan<float>(result->m_data->getData(), result->m_data->getSize(), result);
+    return { GpuSpan<float>(result->m_data->getData(), result->m_data->getSize() / sizeof(float), result), py::none()};
 }
 
 #else
@@ -606,7 +600,7 @@ inline GpuPromise::GpuPromise(std::shared_ptr<GpuPromiseData> data) {
 }
 inline GpuPromise::~GpuPromise() = default;
 template <typename T>
-inline py::array_t<T, py::array::c_style> GpuSpan<T>::collectToCpu() const {
+inline PyFuture GpuSpan<T>::collectToCpu() const {
     throw std::runtime_error("GPU backend not compiled");
 }
 template <typename T>
@@ -626,7 +620,7 @@ inline std::shared_ptr<GpuPromise> uploadToGpu_out_py(py::args args) {
     throw std::runtime_error("GPU backend not compiled");
 }
 
-inline GpuSpan<uint8_t> predicateResultsToBitmapGpu_out_py (
+inline std::pair<GpuSpan<uint8_t>, PyFuture> predicateResultsToBitmapGpu_out_py (
     const GpuSpan<uint32_t> posting_lists,
     const GpuSpan<int32_t> posting_sizes,
     const GpuSpan<int32_t> posting_queries,
@@ -637,7 +631,7 @@ inline GpuSpan<uint8_t> predicateResultsToBitmapGpu_out_py (
     throw std::runtime_error("GPU backend not compiled");
 }
 
-inline GpuSpan<float> cluster_legals_preordered_packed_gpu_out_py (
+inline std::pair<GpuSpan<float>, PyFuture> cluster_legals_preordered_packed_gpu_out_py (
     const GpuSpan<uint8_t> mask_packed_buffer,
     int32_t n_queries,
     int32_t bytes_per_query,

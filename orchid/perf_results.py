@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Generator, Sequence
 import csv
 from dataclasses import dataclass
 from math import sqrt
@@ -168,6 +168,51 @@ def run_measured_iterations(
     min_iterations: int | None = None,
     qps_relative_ci_half_width: float | None = None,
 ) -> Measurement:
+    steps = _measurement_steps(
+        warmup=warmup, iterations=iterations, num_queries=num_queries,
+        before_measure=before_measure, min_iterations=min_iterations,
+        qps_relative_ci_half_width=qps_relative_ci_half_width,
+    )
+    while True:
+        try:
+            record = next(steps)
+        except StopIteration as result:
+            return result.value
+        execute(record)
+
+
+async def run_measured_iterations_async(
+    execute: Callable[[bool], Awaitable[None]],
+    *,
+    warmup: int,
+    iterations: int,
+    num_queries: int,
+    before_measure: Callable[[], None] | None = None,
+    min_iterations: int | None = None,
+    qps_relative_ci_half_width: float | None = None,
+) -> Measurement:
+    steps = _measurement_steps(
+        warmup=warmup, iterations=iterations, num_queries=num_queries,
+        before_measure=before_measure, min_iterations=min_iterations,
+        qps_relative_ci_half_width=qps_relative_ci_half_width,
+    )
+    while True:
+        try:
+            record = next(steps)
+        except StopIteration as result:
+            return result.value
+        await execute(record)
+
+
+def _measurement_steps(
+    *,
+    warmup: int,
+    iterations: int,
+    num_queries: int,
+    before_measure: Callable[[], None] | None = None,
+    min_iterations: int | None = None,
+    qps_relative_ci_half_width: float | None = None,
+) -> Generator[bool, None, Measurement]:
     """Run fixed iterations, or adaptively stop at a precise mean QPS estimate.
 
     In adaptive mode, ``iterations`` is the maximum number of measured runs.
@@ -193,7 +238,7 @@ def run_measured_iterations(
         adaptive_min_iterations = iterations + 1
         adaptive_relative_half_width = 0.0
     for _ in range(warmup):
-        execute(False)
+        yield False
     if before_measure is not None:
         before_measure()
 
@@ -206,7 +251,7 @@ def run_measured_iterations(
     relative_half_width: float | None = None
     converged = not adaptive
     for _ in range(iterations):
-        execute(True)
+        yield True
         iteration_stop = perf_counter()
         iteration_elapsed = iteration_stop - iteration_start
         if iteration_elapsed <= 0:
@@ -402,6 +447,7 @@ __all__ = [
     "require_iteration_agreement",
     "require_measurement_convergence",
     "run_measured_iterations",
+    "run_measured_iterations_async",
     "summarize_timings",
     "write_timing_results",
     "write_sweep_results",

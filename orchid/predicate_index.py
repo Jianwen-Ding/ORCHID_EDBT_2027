@@ -8,6 +8,7 @@ pipeline stage.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -390,8 +391,8 @@ class SortedRangeIndex:
 def materialize_results_gpu(
     results: list[PredicateResult],
     n_docs: int,
-) -> gpu.byte_gpu_span:
-    """Materialize postings or packed bitmaps into a GPU-resident packed batch."""
+) -> tuple[gpu.byte_gpu_span, asyncio.Future | None]:
+    """Return a GPU-resident packed batch and the kernel's optional future."""
     posting_lists = []
     posting_list_sizes = []
     bit_masks = []

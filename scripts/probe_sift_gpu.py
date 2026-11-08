@@ -1,6 +1,7 @@
 """Check the GPU components used by a small ORCHID SIFT run."""
 
 import argparse
+import asyncio
 import sys
 from pathlib import Path
 
@@ -27,7 +28,7 @@ def cuda_architectures() -> str:
     return ";".join(str(capability) for capability in sorted(capabilities))
 
 
-def probe_gpu() -> None:
+async def probe_gpu() -> None:
     import faiss
     import numpy as np
 
@@ -63,9 +64,8 @@ def probe_gpu() -> None:
     ]
     print("GPU probe: FAISS passed; checking utils_cpp mask materialization", flush=True)
     try:
-        actual = np.asarray(
-            materialize_results_gpu(results, 19).collect_to_cpu()
-        ).reshape(2, 3)
+        mi, stamp = materialize_results_gpu(results, 19)
+        actual = np.asarray(await mi.collect_to_cpu()).reshape(2, 3)
     except RuntimeError as exc:
         raise RuntimeError(
             f"utils_cpp GPU mask materialization failed: {exc}. "
@@ -88,7 +88,7 @@ def main() -> int:
         if args.cuda_architectures:
             print(cuda_architectures())
             return 0
-        probe_gpu()
+        asyncio.run(probe_gpu())
     except (
         ImportError, AttributeError, RuntimeError, ValueError, TypeError,
         AssertionError, OSError,

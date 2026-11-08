@@ -104,6 +104,7 @@ class PredicateGpuArgumentsTest(unittest.TestCase):
         spans = tuple(object() for _ in range(4))
         api = Mock()
         api.gpu_prep.side_effect = spans
+        api.predicate_results_to_bitmap.return_value = (object(), None)
         with patch("predicate_index.gpu", api):
             result = materialize_results_gpu(
                 [PostingList(ids), PackedBitmap(bitmap), PostingList(np.empty(0, dtype=np.uint32))],
