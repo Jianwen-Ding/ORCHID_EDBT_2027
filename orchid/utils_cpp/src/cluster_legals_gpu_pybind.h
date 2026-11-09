@@ -291,11 +291,11 @@ class GpuPromiseData;
 class ReadbackPromiseData;
 struct StreamCapsule;
 
-// Represents 
+// Represents a timestamp of a space in gpu time.
 struct GpuTimeStamp {
     // TODO: This sort of locks it into recording the beginning of a stream.
     // For now this is fine but may need to be extended.
-    std::shared_ptr<StreamCapsule> m_stream;
+    std::shared_ptr<const StreamCapsule> m_stream;
 };
 
 // Retains the original arrays; no additional host buffer is allocated.
@@ -319,6 +319,7 @@ public:
     // >>> Pybind <<<
     GpuSpan<uint8_t> collectBufferAsync();
     GpuSpan<uint8_t> collectBufferSync();
+    GpuTimeStamp getBeginTimeStamp();
 };
 
 // Prepares a buffer of numberic values to be uploaded to the gpu
@@ -433,6 +434,9 @@ inline GpuSpan<uint8_t> GpuPromise::collectBufferAsync() {
 inline GpuSpan<uint8_t> GpuPromise::collectBufferSync() {
     m_data->sync();
     return collectBufferAsync();
+}
+inline GpuTimeStamp GpuPromise::getBeginTimeStamp() {
+    return GpuTimeStamp{ m_data->getStream() };
 }
 inline py::object gpuPrep_out_py(py::object item) {
     return detail::SpanUtil::formatGpuUpload(std::move(item));
@@ -613,6 +617,9 @@ inline GpuSpan<uint8_t> GpuPromise::collectBufferAsync() {
 inline GpuSpan<uint8_t> GpuPromise::collectBufferSync() {
     throw std::runtime_error("GPU backend not compiled");
 }
+inline GpuTimeStamp GpuPromise::getBeginTimeStamp() {
+    throw std::runtime_error("GPU backend not compiled");
+}
 inline py::object gpuPrep_out_py(py::object item) {
     throw std::runtime_error("GPU backend not compiled");
 }
@@ -650,9 +657,12 @@ inline void addGpuModule(py::module_ &m) {
         .def_readonly("size", &GpuBuffer::m_size)
         .def_readonly("promise", &GpuBuffer::m_promise);
 
+    py::class_<GpuTimeStamp>(m, "GpuTimeStamp");
+
     py::class_<GpuPromise, std::shared_ptr<GpuPromise>>(m, "GpuPromise")
         .def("collect_buffer_async", &GpuPromise::collectBufferAsync)
-        .def("collect_buffer_sync", &GpuPromise::collectBufferSync);
+        .def("collect_buffer_sync", &GpuPromise::collectBufferSync)
+        .def("get_begin_time_stamp", &GpuPromise::getBeginTimeStamp);
     detail::SpanUtil::addAllSupportedGpuSpan(m);
     m.def("gpu_prep", &gpuPrep_out_py, py::arg("item"));
     m.def("upload_to_gpu", &uploadToGpu_out_py);

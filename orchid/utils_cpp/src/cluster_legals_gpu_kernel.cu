@@ -27,6 +27,7 @@ StreamCapsule::StreamCapsule() {
 }
 
 StreamCapsule::~StreamCapsule() {
+    cudaEventDestroy(m_streamStartEvent);
     cudaStreamDestroy(m_stream);
 }
 
@@ -188,6 +189,29 @@ __global__ void postingListKernel (
     }
 }
 
+// Assigns each block their own cluster to go through
+__global__ void clusterLegalsKernel (
+    float* out,
+    const uint32_t* d_blockSums,
+    const uint8_t* d_maskPackedBuffer,
+    int32_t nQueries,
+    int32_t bytesPerQuery,
+    const int32_t* d_clusterOffsets,
+    const int32_t* d_clusterCounts,
+    int32_t nList,
+    int32_t threadWidth) {
+    // Stores the individual sums
+    extern __shared__ uint16_t threadSums[];
+    
+    // For now this is incredibly naive
+    // TODO: Optimize
+    const int32_t clusterIdx = cub::LowerBound(d_blockSums, nList, static_cast<int32_t>(blockIdx.x));
+    const int32_t innerIdx = (static_cast<int32_t>(blockIdx.x) - d_blockSums[clusterIdx]) * threadWidth + threadIdx.x;
+
+    // for (int i = 0 ; ) {
+
+    // }
+}
 struct ThreadWidthDivision {
     int32_t threadWidth{1};
 
