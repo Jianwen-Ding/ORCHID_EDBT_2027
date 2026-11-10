@@ -17,45 +17,37 @@ namespace cg = cooperative_groups;
 #include <utility>
 
 void StreamCapsule::sync() const {
-    checkGpuStatus(cudaStreamSynchronize(m_stream));
+    checkGpuStatus(cudaStreamSynchronize(get()));
 }
 
 StreamCapsule::StreamCapsule() {
-    checkGpuStatus(cudaStreamCreate(&m_stream));
-    cudaEventCreate(&m_streamStartEvent);
-    cudaEventRecord(m_streamStartEvent, m_stream);
-}
+    cudaStream_t stream = nullptr;
+    checkGpuStatus(cudaStreamCreate(&stream));
+    m_stream.reset(stream, [](cudaStream_t s) { cudaStreamDestroy(s); });
 
-StreamCapsule::~StreamCapsule() {
-    cudaEventDestroy(m_streamStartEvent);
-    cudaStreamDestroy(m_stream);
+    cudaEvent_t event = nullptr;
+    checkGpuStatus(cudaEventCreate(&event));
+    m_streamStartEvent.reset(event, [](cudaEvent_t e) { cudaEventDestroy(e); });
+    
+    checkGpuStatus(cudaEventRecord(event, stream));
 }
-
 
 // Funnels a number of promises into a single gpu promise
-static std::shared_ptr<const StreamCapsule> funnelStreams(const std::vector<std::shared_ptr<const StreamCapsule>>& streams) {
+static StreamCapsule funnelStreams(const std::vector<StreamCapsule>& streams) {
     // TODO: A bit arbitrary might need some specification or something
     // given that only one group of promises is expected for now its fine
-    std::shared_ptr<const StreamCapsule> extendedStream = streams[0];
-    for (int i = 1 ; i < streams.size() ; i++) {
-        streams[i]->sync();
+    StreamCapsule extendedStream = streams[0];
+    for (size_t i = 1 ; i < streams.size() ; i++) {
+        streams[i].sync();
     }
     return extendedStream;
 }
-PromiseData::PromiseData(std::shared_ptr<const StreamCapsule> stream)
-    : m_stream(std::move(stream)) {
-    if (!m_stream) {
-        m_stream = std::make_shared<const StreamCapsule>();
-    }
-}
+PromiseData::PromiseData(StreamCapsule stream)
+    : m_stream(std::move(stream)) {}
 
-PromiseData::~PromiseData() {
-    if (m_event) {
-        cudaEventDestroy(m_event);
-    }
-}
+PromiseData::~PromiseData() = default;
 
-ReadbackPromiseData::ReadbackPromiseData(size_t size, std::shared_ptr<const StreamCapsule> stream)
+ReadbackPromiseData::ReadbackPromiseData(size_t size, StreamCapsule stream)
     : PromiseData(std::move(stream)) {
     m_size = size;
     if (m_size != 0) {
@@ -73,24 +65,30 @@ void ReadbackPromiseData::uploadGpuDataAsync(const void* d_data, size_t size, si
     if (size != 0) {
         void* h_destination = static_cast<uint8_t*>(m_data) + offset;
         checkGpuStatus(cudaMemcpyAsync(h_destination, d_data, size,
-                                       cudaMemcpyDeviceToHost, m_stream->m_stream));
+                                       cudaMemcpyDeviceToHost, m_stream.get()));
     }
 }
 
-GpuPromiseData::GpuPromiseData(size_t size, std::shared_ptr<const StreamCapsule> stream)
+GpuPromiseData::GpuPromiseData(size_t size, StreamCapsule stream)
     : PromiseData(std::move(stream)) {
     m_size = size;
 
     if (m_size != 0) {
-        checkGpuStatus(cudaMallocAsync(&m_data, roundToAlignment(m_size), m_stream->m_stream));
+        checkGpuStatus(cudaMallocAsync(&m_data, roundToAlignment(m_size), m_stream.get()));
     }
 }
 GpuPromiseData::~GpuPromiseData() {
     cudaFree(m_data);
 }
 void PromiseData::finalizePromise() {
-    cudaEventCreate(&m_event);
-    cudaEventRecord(m_event, m_stream->m_stream);
+    if (m_event) {
+        throw std::runtime_error("Promise can't be finalized multiple times");
+    }
+    
+    cudaEvent_t event = nullptr;
+    cudaEventCreate(&event);
+    m_event.reset(event, [](cudaEvent_t e) { cudaEventDestroy(e); });
+    cudaEventRecord(event, m_stream.get());
 }
 const void* PromiseData::getData() const {
     return m_data;
@@ -98,7 +96,7 @@ const void* PromiseData::getData() const {
 void* PromiseData::getData() {
     return m_data;
 }
-std::shared_ptr<const StreamCapsule> PromiseData::getStream() const {
+StreamCapsule PromiseData::getStream() const {
     return m_stream;
 }
 size_t PromiseData::getSize() const {
@@ -107,22 +105,22 @@ size_t PromiseData::getSize() const {
 void GpuPromiseData::uploadValueAsync(int value, size_t size, size_t offset) {
     if (size != 0) {
         void* d_destination = static_cast<uint8_t*>(m_data) + offset;
-        checkGpuStatus(cudaMemsetAsync(d_destination, value, size, m_stream->m_stream));
+        checkGpuStatus(cudaMemsetAsync(d_destination, value, size, m_stream.get()));
     }
 }
 void GpuPromiseData::uploadCpuDataAsync(const void* h_data, size_t size, size_t offset) {
     if (size != 0) {
         void* d_destination = static_cast<uint8_t*>(m_data) + offset;
         checkGpuStatus(cudaMemcpyAsync(d_destination, h_data, size,
-                                       cudaMemcpyHostToDevice, m_stream->m_stream));
+                                       cudaMemcpyHostToDevice, m_stream.get()));
     }
 }
 
 void PromiseData::sync() const {
     if (m_event) {
-        checkGpuStatus(cudaEventSynchronize(m_event));
+        checkGpuStatus(cudaEventSynchronize(m_event.get()));
     } else {
-        checkGpuStatus(cudaStreamSynchronize(m_stream->m_stream));
+        checkGpuStatus(cudaStreamSynchronize(m_stream.get()));
     }
 }
 
@@ -224,7 +222,7 @@ struct ThreadWidthDivision {
 };
 
 std::shared_ptr<GpuPromiseData> predicate_results_to_bitmap_gpu_impl(
-    std::vector<std::shared_ptr<const StreamCapsule>> blockingPromises,
+    std::vector<StreamCapsule> blockingPromises,
     const uint32_t* d_postingLists,
     const int32_t* d_postingSizes,
     const int32_t* d_postingQueries,
@@ -238,7 +236,7 @@ std::shared_ptr<GpuPromiseData> predicate_results_to_bitmap_gpu_impl(
     const size_t totalSize = static_cast<size_t>(nQueries) * bytesPerQuery;
     auto extendedPromise = funnelStreams(blockingPromises);
     auto ret = std::make_shared<GpuPromiseData>(totalSize, extendedPromise);
-    const cudaStream_t stream = extendedPromise->m_stream;
+    const cudaStream_t stream = extendedPromise.get();
     
     if (ret->getData()) {
         ret->uploadValueAsync(0, ret->getSize(), 0);
@@ -295,7 +293,7 @@ std::shared_ptr<GpuPromiseData> predicate_results_to_bitmap_gpu_impl(
 
 
 std::shared_ptr<GpuPromiseData> cluster_legals_preordered_packed_gpu_impl (
-    std::vector<std::shared_ptr<const StreamCapsule>> blockingPromises,
+    std::vector<StreamCapsule> blockingPromises,
     const uint8_t* d_maskPackedBuffer,
     int32_t nQueries,
     int32_t bytesPerQuery,

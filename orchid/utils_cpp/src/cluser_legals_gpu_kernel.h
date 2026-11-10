@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <future>
 #include <thread>
+#include <type_traits>
 #include <memory>
 #include <stdexcept>
 #include <variant>
@@ -37,14 +38,17 @@ struct PromiseCapsule {
     std::function<void(void*)> free;
 };
 
-// Owns a cuda stream.
+// Shared handle to a cuda stream; copies refer to the same stream.
 struct StreamCapsule {
-    cudaEvent_t m_streamStartEvent = nullptr;
-    cudaStream_t m_stream = nullptr;
+    std::shared_ptr<std::remove_pointer_t<cudaStream_t>> m_stream;
+    std::shared_ptr<std::remove_pointer_t<cudaEvent_t>> m_streamStartEvent;
 
-    void sync() const;
+    // Creates a new stream and records its start event.
     StreamCapsule();
-    ~StreamCapsule();
+
+    cudaStream_t get() const { return m_stream.get(); }
+    void sync() const;
+    bool operator==(const StreamCapsule& other) const { return m_stream == other.m_stream; }
 };
 
 // Represents a block of data held up before a cuda event.
@@ -54,10 +58,10 @@ protected:
     size_t m_size{ 0 }; // Logical byte count; allocation is aligned.
 
     // Event that marks the completion of the promise
-    cudaEvent_t m_event{ nullptr };
-    std::shared_ptr<const StreamCapsule> m_stream{ nullptr };
+    std::shared_ptr<std::remove_pointer_t<cudaEvent_t>> m_event;
+    StreamCapsule m_stream;
 
-    PromiseData(std::shared_ptr<const StreamCapsule> stream);
+    PromiseData(StreamCapsule stream);
     ~PromiseData();
 
 public:
@@ -68,7 +72,7 @@ public:
     void finalizePromise();
 
     // Getters and setters
-    std::shared_ptr<const StreamCapsule> getStream() const;
+    StreamCapsule getStream() const;
     size_t getSize() const;
     const void* getData() const;
     void* getData();
@@ -80,7 +84,7 @@ public:
 // Owns pinned Cpu data that may be in transit from the Gpu.
 class ReadbackPromiseData : public PromiseData {
 public:
-    ReadbackPromiseData(size_t size, std::shared_ptr<const StreamCapsule> stream = nullptr);
+    ReadbackPromiseData(size_t size, StreamCapsule stream = StreamCapsule());
     ~ReadbackPromiseData();
 
     // Caller checks capacity and retains d_data until the copy completes.
@@ -91,7 +95,7 @@ public:
 // Represents a block of data to be completed within the Gpu
 class GpuPromiseData : public PromiseData {
 public:
-    GpuPromiseData(size_t size, std::shared_ptr<const StreamCapsule> stream = nullptr);
+    GpuPromiseData(size_t size, StreamCapsule stream = StreamCapsule());
     ~GpuPromiseData();
 
     void uploadValueAsync(int value, size_t size, size_t offset);
@@ -104,7 +108,7 @@ public:
 };
 
 std::shared_ptr<GpuPromiseData> predicate_results_to_bitmap_gpu_impl (
-    std::vector<std::shared_ptr<const StreamCapsule>> blockingPromises,
+    std::vector<StreamCapsule> blockingPromises,
     const uint32_t* d_postingLists,
     const int32_t* d_postingSizes,
     const int32_t* d_postingQueries,
@@ -118,7 +122,7 @@ std::shared_ptr<GpuPromiseData> predicate_results_to_bitmap_gpu_impl (
 
 
 std::shared_ptr<GpuPromiseData> cluster_legals_preordered_packed_gpu_impl (
-    std::vector<std::shared_ptr<const StreamCapsule>> blockingPromises,
+    std::vector<StreamCapsule> blockingPromises,
     const uint8_t* d_maskPackedBuffer,
     int32_t nQueries,
     int32_t bytesPerQuery,

@@ -62,7 +62,7 @@ public:
     const GpuBuffer& getBuffer() const;
 };
 
-    
+
 
 
 namespace detail {
@@ -293,9 +293,9 @@ struct StreamCapsule;
 
 // Represents a timestamp of a space in gpu time.
 struct GpuTimeStamp {
-    // TODO: This sort of locks it into recording the beginning of a stream.
-    // For now this is fine but may need to be extended.
-    std::shared_ptr<const StreamCapsule> m_stream;
+    // For now just takes an event from the start of an stream
+    // TODO: May need to be a bit more extensible in future
+    StreamCapsule m_event;
 };
 
 // Retains the original arrays; no additional host buffer is allocated.
@@ -375,13 +375,13 @@ namespace detail {
         return py::cast(value);
     }
     
-    inline std::vector<std::shared_ptr<const StreamCapsule>> gatherPromises(std::vector<const GpuBuffer*> buffers) {
-        std::vector<std::shared_ptr<const StreamCapsule>> ret;
+    inline std::vector<StreamCapsule> gatherPromises(std::vector<const GpuBuffer*> buffers) {
+        std::vector<StreamCapsule> ret;
         for (size_t i = 0 ; i < buffers.size() ; i += 1) {
             if (!buffers[i]->m_promise) {
                 throw std::runtime_error("Span has not been uploaded to the GPU yet");
             }
-            std::shared_ptr<const StreamCapsule> stream = buffers[i]->m_promise->m_data->getStream();
+            StreamCapsule stream = buffers[i]->m_promise->m_data->getStream();
             if (std::find(ret.begin(), ret.end(), stream) == ret.end()) {
                 ret.push_back(stream);
             }
