@@ -63,8 +63,6 @@ public:
 };
 
 
-
-
 namespace detail {
     // Helper function for adding GPU span
     template<typename T>
@@ -291,11 +289,9 @@ class GpuPromiseData;
 class ReadbackPromiseData;
 struct StreamCapsule;
 
-// Represents a timestamp of a space in gpu time.
+// Represents a timestamp of an event that has been made in the gpu
 struct GpuTimeStamp {
-    // For now just takes an event from the start of an stream
-    // TODO: May need to be a bit more extensible in future
-    StreamCapsule m_event;
+    EventCapsule m_event;
 };
 
 // Retains the original arrays; no additional host buffer is allocated.
@@ -319,7 +315,9 @@ public:
     // >>> Pybind <<<
     GpuSpan<uint8_t> collectBufferAsync();
     GpuSpan<uint8_t> collectBufferSync();
-    GpuTimeStamp getBeginTimeStamp();
+
+    PyFuture getBeginTimeStamp();
+    PyFuture getEndTimeStamp();
 };
 
 // Prepares a buffer of numberic values to be uploaded to the gpu
@@ -348,6 +346,24 @@ namespace detail {
                 py::gil_scoped_acquire gil;
                 auto& [loop, fut] = *state;
                 loop.attr("call_soon_threadsafe")(fut.attr("set_result"), processor(data->getData(), data->getSize()));
+                delete state;
+            }
+        }).detach();
+
+        return fut;
+    }
+    inline PyFuture makeTimeStampFuture(TimeStampData data) {
+        py::object loop = py::module_::import("asyncio").attr("get_running_loop")();
+        PyFuture fut  = loop.attr("create_future")();
+
+        auto* state = new std::pair<py::object, PyFuture>(loop, fut);
+
+        std::thread([data, state] {
+            data.sync();
+            {
+                py::gil_scoped_acquire gil;
+                auto& [loop, fut] = *state;
+                loop.attr("call_soon_threadsafe")(fut.attr("set_result"), data.getTimeStamp());
                 delete state;
             }
         }).detach();
@@ -421,6 +437,7 @@ PyFuture GpuSpan<T>::collectToCpu() const {
     auto readback = m_promise->m_data->copyToCpu(m_data, m_size * sizeof(T));
     return detail::makeReadbackFuture(readback, detail::convertSpanData<T>);
 }
+
 template <typename T>
 inline const GpuBuffer& GpuSpan<T>::getBuffer() const {
     if (!m_uploaded) {
@@ -435,10 +452,10 @@ inline GpuSpan<uint8_t> GpuPromise::collectBufferSync() {
     m_data->sync();
     return collectBufferAsync();
 }
-inline GpuTimeStamp GpuPromise::getBeginTimeStamp() {
-    return GpuTimeStamp{ m_data->getStream() };
+inline PyFuture GpuPromise::getBeginTimeStamp() {
+    return GpuTimeStamp{ m_data->get() };
 }
-inline py::object gpuPrep_out_py(py::object item) {
+inline PyFuture gpuPrep_out_py(py::object item) {
     return detail::SpanUtil::formatGpuUpload(std::move(item));
 }
 

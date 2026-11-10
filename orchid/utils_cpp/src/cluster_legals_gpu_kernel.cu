@@ -16,6 +16,9 @@ namespace cg = cooperative_groups;
 #include <stdexcept>
 #include <utility>
 
+// Used to synchronize timestamps
+static std::shared_ptr<std::remove_pointer_t<cudaEvent_t>> g_earliestEvent;
+
 void StreamCapsule::sync() const {
     checkGpuStatus(cudaStreamSynchronize(get()));
 }
@@ -30,6 +33,11 @@ StreamCapsule::StreamCapsule() {
     m_streamStartEvent.reset(event, [](cudaEvent_t e) { cudaEventDestroy(e); });
     
     checkGpuStatus(cudaEventRecord(event, stream));
+
+    if (g_earliestEvent.get() == nullptr) {
+        g_earliestEvent = m_streamStartEvent;
+        checkGpuStatus(cudaEventSynchronize(g_earliestEvent.get()));
+    }
 }
 
 // Funnels a number of promises into a single gpu promise
@@ -138,6 +146,19 @@ std::shared_ptr<const ReadbackPromiseData> GpuPromiseData::copyToCpu(const void*
     result->finalizePromise();
     return result;
 }
+
+    // std::shared_ptr<std::remove_pointer_t<cudaEvent_t>> m_event;
+
+void TimeStampData::sync() const {
+    checkGpuStatus(cudaEventSynchronize(m_event.get()));
+}
+
+float TimeStampData::getTimeStamp() const {
+    checkGpuStatus(cudaEventSynchronize(m_event.get()));
+    float ms;
+    cudaEventElapsedTime(&ms, g_earliestEvent.get(), m_event.get());
+}
+
 
 // Assigns each thread a chunk of one posting list.
 __global__ void postingListKernel (

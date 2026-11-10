@@ -13,6 +13,8 @@
 #include <functional>
 #include <vector>
 
+// cluster_legals_gpu_kernel implements the cuda logic that pybind interfaces with.
+
 inline void checkGpuStatus(cudaError_t status) {
     if (status != cudaSuccess) {
         throw std::runtime_error(cudaGetErrorString(status));
@@ -31,14 +33,7 @@ inline size_t roundToAlignment(size_t number) {
     return round(number, GpuAlignment);
 }
 
-// Allows for the creation and deletion of 
-// cuda page host allocation
-struct PromiseCapsule {
-    void* ptr;
-    std::function<void(void*)> free;
-};
-
-// Shared handle to a cuda stream; copies refer to the same stream.
+// Shared handle to a cuda stream. copies refer to the same stream.
 struct StreamCapsule {
     std::shared_ptr<std::remove_pointer_t<cudaStream_t>> m_stream;
     std::shared_ptr<std::remove_pointer_t<cudaEvent_t>> m_streamStartEvent;
@@ -55,10 +50,11 @@ struct StreamCapsule {
 struct PromiseData {
 protected:
     void* m_data{ nullptr };
-    size_t m_size{ 0 }; // Logical byte count; allocation is aligned.
+    size_t m_size{ 0 };
 
     // Event that marks the completion of the promise
     std::shared_ptr<std::remove_pointer_t<cudaEvent_t>> m_event;
+    std::shared_ptr<std::remove_pointer_t<cudaEvent_t>> m_startPromise;
     StreamCapsule m_stream;
 
     PromiseData(StreamCapsule stream);
@@ -73,6 +69,8 @@ public:
 
     // Getters and setters
     StreamCapsule getStream() const;
+    StreamCapsule getStartTimeStamp() const;
+    StreamCapsule getEndTimeStamp() const;
     size_t getSize() const;
     const void* getData() const;
     void* getData();
@@ -91,7 +89,6 @@ public:
     void uploadGpuDataAsync(const void* d_data, size_t size, size_t offset);
 };
 
-
 // Represents a block of data to be completed within the Gpu
 class GpuPromiseData : public PromiseData {
 public:
@@ -105,6 +102,21 @@ public:
     std::shared_ptr<const ReadbackPromiseData> collectRawCpuCopy() const;
     // Copies a portion of the gpu data within bounds to cpu
     std::shared_ptr<const ReadbackPromiseData> copyToCpu(const void* d_gpuData, size_t size) const;
+};
+
+// Owns an event and handles 
+// The thing being time stamped may not have even happened yet 
+class TimeStampData {
+private:
+    // Event being time stamped
+    std::shared_ptr<std::remove_pointer_t<cudaEvent_t>> m_event;
+
+public:
+    // Synchronizes Gpu such that time stamped event actually happens
+    void sync() const;
+
+    // The time in milliseconds a Cuda event happened from some unspecified base
+    float getTimeStamp() const;
 };
 
 std::shared_ptr<GpuPromiseData> predicate_results_to_bitmap_gpu_impl (
