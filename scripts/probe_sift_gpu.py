@@ -64,8 +64,11 @@ async def probe_gpu() -> None:
     ]
     print("GPU probe: FAISS passed; checking utils_cpp mask materialization", flush=True)
     try:
-        mi, stamp = materialize_results_gpu(results, 19)
+        mi, start_stamp, end_stamp = materialize_results_gpu(results, 19)
         actual = np.asarray(await mi.collect_to_cpu()).reshape(2, 3)
+        # Timestamp threads must finish before asyncio.run closes the event loop.
+        await start_stamp
+        await end_stamp
     except RuntimeError as exc:
         raise RuntimeError(
             f"utils_cpp GPU mask materialization failed: {exc}. "

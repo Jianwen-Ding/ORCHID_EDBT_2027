@@ -391,7 +391,7 @@ class SortedRangeIndex:
 def materialize_results_gpu(
     results: list[PredicateResult],
     n_docs: int,
-) -> tuple[gpu.byte_gpu_span, asyncio.Future | None]:
+) -> tuple[gpu.byte_gpu_span,  asyncio.Future,  asyncio.Future ]:
     """Return a GPU-resident packed batch and the kernel's optional future."""
     posting_lists = []
     posting_list_sizes = []
@@ -409,13 +409,13 @@ def materialize_results_gpu(
         else:
             raise TypeError("GPU bitmap materialization requires PostingList or PackedBitmap results")
     
-    gpu.upload_to_gpu(
+    upload_promise = gpu.upload_to_gpu(
         posting_list_span := gpu.gpu_prep(posting_lists if posting_lists else _EMPTY_IDS),
         list_sizing_span := gpu.gpu_prep(np.asarray(posting_list_sizes, dtype=np.int32)),
         list_indices_span := gpu.gpu_prep(np.asarray(list_indices, dtype=np.int32)),
         bit_mask_span := gpu.gpu_prep(bit_masks if bit_masks else np.empty(0, dtype=np.uint8)),
     )
-    return gpu.predicate_results_to_bitmap(
+    bitmask_span = gpu.predicate_results_to_bitmap(
         posting_list_span,
         list_sizing_span,
         list_indices_span,
@@ -425,6 +425,9 @@ def materialize_results_gpu(
         n_docs,
     )
 
+    start_stamp = upload_promise.get_start_time_stamp()
+    end_stamp = bitmask_span.promise.get_end_time_stamp()
+    return (bitmask_span, start_stamp, end_stamp)
 
 def materialize_results(
     results: list[PredicateResult],

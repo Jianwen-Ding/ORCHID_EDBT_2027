@@ -37,6 +37,13 @@ class SiftGpuProbeTest(unittest.IsolatedAsyncioTestCase):
             return future
         self.span.collect_to_cpu.side_effect = collect
 
+    def materialized(self):
+        loop = asyncio.get_running_loop()
+        stamps = [loop.create_future(), loop.create_future()]
+        for stamp in stamps:
+            stamp.set_result(0.0)
+        return (self.span, *stamps)
+
     async def test_rejects_cpu_only_faiss(self):
         with (
             patch.dict("sys.modules", {"faiss": SimpleNamespace()}),
@@ -65,7 +72,7 @@ class SiftGpuProbeTest(unittest.IsolatedAsyncioTestCase):
         with (
             patch.dict("sys.modules", {"faiss": self.faiss}),
             patch(
-                "predicate_index.materialize_results_gpu", return_value=(self.span, None)
+                "predicate_index.materialize_results_gpu", return_value=self.materialized()
             ) as materialize,
         ):
             await probe.probe_gpu()
@@ -87,7 +94,7 @@ class SiftGpuProbeTest(unittest.IsolatedAsyncioTestCase):
         self.cpu_result = np.zeros(6, dtype=np.uint8)
         with (
             patch.dict("sys.modules", {"faiss": self.faiss}),
-            patch("predicate_index.materialize_results_gpu", return_value=(self.span, None)),
+            patch("predicate_index.materialize_results_gpu", return_value=self.materialized()),
             self.assertRaises(AssertionError),
         ):
             await probe.probe_gpu()

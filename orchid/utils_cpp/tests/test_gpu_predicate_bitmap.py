@@ -43,7 +43,7 @@ class GpuPredicateBitmapTest(unittest.IsolatedAsyncioTestCase):
         spans = self.upload(values, separate_uploads)
         # Reusing the exact metadata catches accidental in-place prefix scans.
         for _ in range(2):
-            result, _ = gpu.predicate_results_to_bitmap(
+            result = gpu.predicate_results_to_bitmap(
                 *spans, np.asarray(mask_queries, dtype=np.int64), n_queries, n_docs)
             actual = await result.collect_to_cpu()
             self.assertEqual(actual.size, n_queries * width)
@@ -91,7 +91,7 @@ class GpuPredicateBitmapTest(unittest.IsolatedAsyncioTestCase):
                 np.array([0], np.int32), np.empty(0, np.uint8),
             ])
             return gpu.predicate_results_to_bitmap(*spans, np.empty(0, np.int64), 1, 4097)
-        result, _ = materialize()
+        result = materialize()
         gc.collect()
         expected = np.packbits(np.ones(4097, np.uint8), bitorder="little")
         np.testing.assert_array_equal(await result.collect_to_cpu(), expected)

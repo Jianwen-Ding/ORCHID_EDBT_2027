@@ -27,17 +27,6 @@ StreamCapsule::StreamCapsule() {
     cudaStream_t stream = nullptr;
     checkGpuStatus(cudaStreamCreate(&stream));
     m_stream.reset(stream, [](cudaStream_t s) { cudaStreamDestroy(s); });
-
-    cudaEvent_t event = nullptr;
-    checkGpuStatus(cudaEventCreate(&event));
-    m_streamStartEvent.reset(event, [](cudaEvent_t e) { cudaEventDestroy(e); });
-    
-    checkGpuStatus(cudaEventRecord(event, stream));
-
-    if (g_earliestEvent.get() == nullptr) {
-        g_earliestEvent = m_streamStartEvent;
-        checkGpuStatus(cudaEventSynchronize(g_earliestEvent.get()));
-    }
 }
 
 // Funnels a number of promises into a single gpu promise
@@ -50,14 +39,28 @@ static StreamCapsule funnelStreams(const std::vector<StreamCapsule>& streams) {
     }
     return extendedStream;
 }
-PromiseData::PromiseData(StreamCapsule stream)
-    : m_stream(std::move(stream)) {}
+PromiseData::PromiseData(size_t size, StreamCapsule stream)
+    : m_size(size), m_stream(std::move(stream)) {
+    if (m_size == 0) {
+        throw std::runtime_error("Promise can't hold no information whatsoever");
+    }
+
+    cudaEvent_t event = nullptr;
+    checkGpuStatus(cudaEventCreate(&event));
+    m_startEvent.reset(event, [](cudaEvent_t e) { cudaEventDestroy(e); });
+
+    checkGpuStatus(cudaEventRecord(event, m_stream.get()));
+
+    if (g_earliestEvent.get() == nullptr) {
+        g_earliestEvent = m_startEvent;
+        checkGpuStatus(cudaEventSynchronize(g_earliestEvent.get()));
+    }
+}
 
 PromiseData::~PromiseData() = default;
 
 ReadbackPromiseData::ReadbackPromiseData(size_t size, StreamCapsule stream)
-    : PromiseData(std::move(stream)) {
-    m_size = size;
+    : PromiseData(size, std::move(stream)) {
     if (m_size != 0) {
         checkGpuStatus(cudaMallocHost(&m_data, roundToAlignment(m_size)));
     }
@@ -78,24 +81,21 @@ void ReadbackPromiseData::uploadGpuDataAsync(const void* d_data, size_t size, si
 }
 
 GpuPromiseData::GpuPromiseData(size_t size, StreamCapsule stream)
-    : PromiseData(std::move(stream)) {
-    m_size = size;
+    : PromiseData(size, std::move(stream)) {
+    checkGpuStatus(cudaMallocAsync(&m_data, roundToAlignment(m_size), m_stream.get()));
 
-    if (m_size != 0) {
-        checkGpuStatus(cudaMallocAsync(&m_data, roundToAlignment(m_size), m_stream.get()));
-    }
 }
 GpuPromiseData::~GpuPromiseData() {
-    cudaFree(m_data);
+    cudaFreeAsync(m_data, m_stream.get());
 }
 void PromiseData::finalizePromise() {
-    if (m_event) {
+    if (m_endEvent) {
         throw std::runtime_error("Promise can't be finalized multiple times");
     }
-    
+
     cudaEvent_t event = nullptr;
     cudaEventCreate(&event);
-    m_event.reset(event, [](cudaEvent_t e) { cudaEventDestroy(e); });
+    m_endEvent.reset(event, [](cudaEvent_t e) { cudaEventDestroy(e); });
     cudaEventRecord(event, m_stream.get());
 }
 const void* PromiseData::getData() const {
@@ -106,6 +106,15 @@ void* PromiseData::getData() {
 }
 StreamCapsule PromiseData::getStream() const {
     return m_stream;
+}
+TimeStampData PromiseData::getStartTimeStamp() const {
+    return TimeStampData(m_startEvent);
+}
+TimeStampData PromiseData::getEndTimeStamp() const {
+    if (!m_endEvent) {
+        throw std::runtime_error("Promise must be finalized before reading its end time stamp");
+    }
+    return TimeStampData(m_endEvent);
 }
 size_t PromiseData::getSize() const {
     return m_size;
@@ -125,8 +134,8 @@ void GpuPromiseData::uploadCpuDataAsync(const void* h_data, size_t size, size_t 
 }
 
 void PromiseData::sync() const {
-    if (m_event) {
-        checkGpuStatus(cudaEventSynchronize(m_event.get()));
+    if (m_endEvent) {
+        checkGpuStatus(cudaEventSynchronize(m_endEvent.get()));
     } else {
         checkGpuStatus(cudaStreamSynchronize(m_stream.get()));
     }
@@ -149,6 +158,9 @@ std::shared_ptr<const ReadbackPromiseData> GpuPromiseData::copyToCpu(const void*
 
     // std::shared_ptr<std::remove_pointer_t<cudaEvent_t>> m_event;
 
+TimeStampData::TimeStampData(std::shared_ptr<std::remove_pointer_t<cudaEvent_t>> event)
+    : m_event(std::move(event)) {}
+
 void TimeStampData::sync() const {
     checkGpuStatus(cudaEventSynchronize(m_event.get()));
 }
@@ -156,7 +168,8 @@ void TimeStampData::sync() const {
 float TimeStampData::getTimeStamp() const {
     checkGpuStatus(cudaEventSynchronize(m_event.get()));
     float ms;
-    cudaEventElapsedTime(&ms, g_earliestEvent.get(), m_event.get());
+    checkGpuStatus(cudaEventElapsedTime(&ms, g_earliestEvent.get(), m_event.get()));
+    return ms;
 }
 
 
@@ -263,52 +276,49 @@ std::shared_ptr<GpuPromiseData> predicate_results_to_bitmap_gpu_impl(
         ret->uploadValueAsync(0, ret->getSize(), 0);
     }
 
+    // Streams posting lists into logic
     int64_t* d_postingMetadata = nullptr;
-    try {
-        if (postingCount) {
-            const size_t metadataBytes = static_cast<size_t>(postingCount) * 2 * sizeof(int64_t);
-            checkGpuStatus(cudaMallocAsync(
-                reinterpret_cast<void**>(&d_postingMetadata), metadataBytes, stream));
-            int64_t* d_threadCounts = d_postingMetadata;
-            int64_t* d_postingOffsets = d_postingMetadata + postingCount;
-            const int32_t threadWidth = 128;
-            const auto policy = thrust::cuda::par_nosync.on(stream);
-            thrust::transform(
-                policy, d_postingSizes, d_postingSizes + postingCount,
-                d_threadCounts, ThreadWidthDivision{threadWidth});
-            thrust::inclusive_scan(policy, d_threadCounts, d_threadCounts + postingCount, d_threadCounts);
-            // Preserve input sizes and accumulate offsets without 32-bit overflow.
-            thrust::transform(
-                policy, d_postingSizes, d_postingSizes + postingCount,
-                d_postingOffsets, ThreadWidthDivision{1});
-            thrust::inclusive_scan(policy, d_postingOffsets, d_postingOffsets + postingCount, d_postingOffsets);
-    
-            // Sum ceil(size / threadWidth) <= postingCount + floor(entries / threadWidth).
-            // The uploaded span provides this bound without copying a scan result to the CPU.
-            const int64_t totalThreads = postingCount + postingEntries / threadWidth;
-            const int blocks = static_cast<int>((totalThreads + 255) / 256);
+    if (postingCount) {
+        const size_t metadataBytes = static_cast<size_t>(postingCount) * 2 * sizeof(int64_t);
+        checkGpuStatus(cudaMallocAsync(
+            reinterpret_cast<void**>(&d_postingMetadata), metadataBytes, stream));
+        int64_t* d_threadCounts = d_postingMetadata;
+        int64_t* d_postingOffsets = d_postingMetadata + postingCount;
+        const int32_t threadWidth = 128;
+        const auto policy = thrust::cuda::par_nosync.on(stream);
+        thrust::transform(
+            policy, d_postingSizes, d_postingSizes + postingCount,
+            d_threadCounts, ThreadWidthDivision{threadWidth});
+        thrust::inclusive_scan(policy, d_threadCounts, d_threadCounts + postingCount, d_threadCounts);
+        // Preserve input sizes and accumulate offsets without 32-bit overflow.
+        thrust::transform(
+            policy, d_postingSizes, d_postingSizes + postingCount,
+            d_postingOffsets, ThreadWidthDivision{1});
+        thrust::inclusive_scan(policy, d_postingOffsets, d_postingOffsets + postingCount, d_postingOffsets);
 
-            postingListKernel<<<blocks, 256, metadataBytes, stream>>>(
-                d_postingLists, d_threadCounts, d_postingOffsets, d_postingQueries,
-                static_cast<uint8_t*>(ret->getData()), bytesPerQuery,
-                threadWidth, postingCount);
+        // Sum ceil(size / threadWidth) <= postingCount + floor(entries / threadWidth).
+        // The uploaded span provides this bound without copying a scan result to the CPU.
+        const int64_t totalThreads = postingCount + postingEntries / threadWidth;
+        const int blocks = static_cast<int>((totalThreads + 255) / 256);
 
-            checkGpuStatus(cudaGetLastError());
-            checkGpuStatus(cudaFreeAsync(d_postingMetadata, stream));
-            d_postingMetadata = nullptr;
-        }
-        // Run after posting atomics: adjacent rows may share an atomic word.
-        for (int32_t i = 0; i < denseMaskCount; ++i) {
-            checkGpuStatus(cudaMemcpyAsync(
-                static_cast<uint8_t*>(ret->getData()) + h_denseMaskQueries[i] * bytesPerQuery,
-                d_denseMasks + static_cast<int64_t>(i) * bytesPerQuery,
-                bytesPerQuery, cudaMemcpyDeviceToDevice, stream));
-        }
-        ret->finalizePromise();
-    } catch (...) {
-        if (d_postingMetadata) cudaFreeAsync(d_postingMetadata, stream);
-        throw;
+        postingListKernel<<<blocks, 256, metadataBytes, stream>>>(
+            d_postingLists, d_threadCounts, d_postingOffsets, d_postingQueries,
+            static_cast<uint8_t*>(ret->getData()), bytesPerQuery,
+            threadWidth, postingCount);
+
+        checkGpuStatus(cudaGetLastError());
+        checkGpuStatus(cudaFreeAsync(d_postingMetadata, stream));
+        d_postingMetadata = nullptr;
     }
+
+    // Run after posting atomics: adjacent rows may share an atomic word.
+    for (int32_t i = 0; i < denseMaskCount; ++i) {
+        checkGpuStatus(cudaMemcpyAsync(
+            static_cast<uint8_t*>(ret->getData()) + h_denseMaskQueries[i] * bytesPerQuery,
+            d_denseMasks + static_cast<int64_t>(i) * bytesPerQuery,
+            bytesPerQuery, cudaMemcpyDeviceToDevice, stream));
+    }
+    ret->finalizePromise();
     return ret;
 }
 

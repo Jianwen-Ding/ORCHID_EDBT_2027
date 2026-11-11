@@ -289,11 +289,6 @@ class GpuPromiseData;
 class ReadbackPromiseData;
 struct StreamCapsule;
 
-// Represents a timestamp of an event that has been made in the gpu
-struct GpuTimeStamp {
-    EventCapsule m_event;
-};
-
 // Retains the original arrays; no additional host buffer is allocated.
 struct CpuUploadCapsule {
     std::vector<py::array> sources;
@@ -316,7 +311,7 @@ public:
     GpuSpan<uint8_t> collectBufferAsync();
     GpuSpan<uint8_t> collectBufferSync();
 
-    PyFuture getBeginTimeStamp();
+    PyFuture getStartTimeStamp();
     PyFuture getEndTimeStamp();
 };
 
@@ -452,8 +447,11 @@ inline GpuSpan<uint8_t> GpuPromise::collectBufferSync() {
     m_data->sync();
     return collectBufferAsync();
 }
-inline PyFuture GpuPromise::getBeginTimeStamp() {
-    return GpuTimeStamp{ m_data->get() };
+inline PyFuture GpuPromise::getStartTimeStamp() {
+    return detail::makeTimeStampFuture(m_data->getStartTimeStamp());
+}
+inline PyFuture GpuPromise::getEndTimeStamp() {
+    return detail::makeTimeStampFuture(m_data->getEndTimeStamp());
 }
 inline PyFuture gpuPrep_out_py(py::object item) {
     return detail::SpanUtil::formatGpuUpload(std::move(item));
@@ -527,7 +525,7 @@ inline std::shared_ptr<GpuPromise> uploadToGpu_out_py(py::args args) {
     return promise;
 }
 
-inline std::pair<GpuSpan<uint8_t>, PyFuture> predicateResultsToBitmapGpu_out_py (
+inline GpuSpan<uint8_t> predicateResultsToBitmapGpu_out_py (
     const GpuSpan<uint32_t> posting_lists,
     const GpuSpan<int32_t> posting_sizes,
     const GpuSpan<int32_t> posting_queries,
@@ -585,10 +583,10 @@ inline std::pair<GpuSpan<uint8_t>, PyFuture> predicateResultsToBitmapGpu_out_py 
         n_queries, bytes_per_query,
         static_cast<int32_t>(posting_query_count), static_cast<int32_t>(mask_query_count),
         static_cast<int64_t>(posting_count)));
-    return {result->collectBufferAsync(), py::none()};
+    return result->collectBufferAsync();
 }
 
-inline std::pair<GpuSpan<float>, PyFuture> cluster_legals_preordered_packed_gpu_out_py (
+inline GpuSpan<float> cluster_legals_preordered_packed_gpu_out_py (
     const GpuSpan<uint8_t> mask_packed_buffer,
     int32_t n_queries,
     int32_t bytes_per_query,
@@ -604,7 +602,7 @@ inline std::pair<GpuSpan<float>, PyFuture> cluster_legals_preordered_packed_gpu_
         static_cast<const int32_t*>(cluster_offsets.getBuffer().m_data), 
         static_cast<const int32_t*>(cluster_counts.getBuffer().m_data), 
         n_list));
-    return { GpuSpan<float>(result->m_data->getData(), result->m_data->getSize() / sizeof(float), result), py::none()};
+    return GpuSpan<float>(result->m_data->getData(), result->m_data->getSize() / sizeof(float), result);
 }
 
 #else
@@ -634,7 +632,10 @@ inline GpuSpan<uint8_t> GpuPromise::collectBufferAsync() {
 inline GpuSpan<uint8_t> GpuPromise::collectBufferSync() {
     throw std::runtime_error("GPU backend not compiled");
 }
-inline GpuTimeStamp GpuPromise::getBeginTimeStamp() {
+inline PyFuture GpuPromise::getStartTimeStamp() {
+    throw std::runtime_error("GPU backend not compiled");
+}
+inline PyFuture GpuPromise::getEndTimeStamp() {
     throw std::runtime_error("GPU backend not compiled");
 }
 inline py::object gpuPrep_out_py(py::object item) {
@@ -644,7 +645,7 @@ inline std::shared_ptr<GpuPromise> uploadToGpu_out_py(py::args args) {
     throw std::runtime_error("GPU backend not compiled");
 }
 
-inline std::pair<GpuSpan<uint8_t>, PyFuture> predicateResultsToBitmapGpu_out_py (
+inline GpuSpan<uint8_t> predicateResultsToBitmapGpu_out_py (
     const GpuSpan<uint32_t> posting_lists,
     const GpuSpan<int32_t> posting_sizes,
     const GpuSpan<int32_t> posting_queries,
@@ -655,7 +656,7 @@ inline std::pair<GpuSpan<uint8_t>, PyFuture> predicateResultsToBitmapGpu_out_py 
     throw std::runtime_error("GPU backend not compiled");
 }
 
-inline std::pair<GpuSpan<float>, PyFuture> cluster_legals_preordered_packed_gpu_out_py (
+inline <GpuSpan<float>> cluster_legals_preordered_packed_gpu_out_py (
     const GpuSpan<uint8_t> mask_packed_buffer,
     int32_t n_queries,
     int32_t bytes_per_query,
@@ -674,12 +675,11 @@ inline void addGpuModule(py::module_ &m) {
         .def_readonly("size", &GpuBuffer::m_size)
         .def_readonly("promise", &GpuBuffer::m_promise);
 
-    py::class_<GpuTimeStamp>(m, "GpuTimeStamp");
-
     py::class_<GpuPromise, std::shared_ptr<GpuPromise>>(m, "GpuPromise")
         .def("collect_buffer_async", &GpuPromise::collectBufferAsync)
         .def("collect_buffer_sync", &GpuPromise::collectBufferSync)
-        .def("get_begin_time_stamp", &GpuPromise::getBeginTimeStamp);
+        .def("get_start_time_stamp", &GpuPromise::getStartTimeStamp)
+        .def("get_end_time_stamp", &GpuPromise::getEndTimeStamp);
     detail::SpanUtil::addAllSupportedGpuSpan(m);
     m.def("gpu_prep", &gpuPrep_out_py, py::arg("item"));
     m.def("upload_to_gpu", &uploadToGpu_out_py);

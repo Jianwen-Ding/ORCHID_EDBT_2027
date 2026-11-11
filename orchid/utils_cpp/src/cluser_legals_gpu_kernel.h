@@ -36,15 +36,16 @@ inline size_t roundToAlignment(size_t number) {
 // Shared handle to a cuda stream. copies refer to the same stream.
 struct StreamCapsule {
     std::shared_ptr<std::remove_pointer_t<cudaStream_t>> m_stream;
-    std::shared_ptr<std::remove_pointer_t<cudaEvent_t>> m_streamStartEvent;
 
-    // Creates a new stream and records its start event.
+    // Creates a new stream.
     StreamCapsule();
 
     cudaStream_t get() const { return m_stream.get(); }
     void sync() const;
     bool operator==(const StreamCapsule& other) const { return m_stream == other.m_stream; }
 };
+
+class TimeStampData;
 
 // Represents a block of data held up before a cuda event.
 struct PromiseData {
@@ -53,11 +54,11 @@ protected:
     size_t m_size{ 0 };
 
     // Event that marks the completion of the promise
-    std::shared_ptr<std::remove_pointer_t<cudaEvent_t>> m_event;
-    std::shared_ptr<std::remove_pointer_t<cudaEvent_t>> m_startPromise;
+    std::shared_ptr<std::remove_pointer_t<cudaEvent_t>> m_endEvent;
+    std::shared_ptr<std::remove_pointer_t<cudaEvent_t>> m_startEvent;
     StreamCapsule m_stream;
 
-    PromiseData(StreamCapsule stream);
+    PromiseData(size_t size, StreamCapsule stream);
     ~PromiseData();
 
 public:
@@ -69,8 +70,8 @@ public:
 
     // Getters and setters
     StreamCapsule getStream() const;
-    StreamCapsule getStartTimeStamp() const;
-    StreamCapsule getEndTimeStamp() const;
+    TimeStampData getStartTimeStamp() const;
+    TimeStampData getEndTimeStamp() const;
     size_t getSize() const;
     const void* getData() const;
     void* getData();
@@ -109,9 +110,11 @@ public:
 class TimeStampData {
 private:
     // Event being time stamped
-    std::shared_ptr<std::remove_pointer_t<cudaEvent_t>> m_event;
+    std::shared_ptr<std::remove_pointer_t<cudaEvent_t>> m_event{ nullptr };
 
 public:
+    TimeStampData(std::shared_ptr<std::remove_pointer_t<cudaEvent_t>> event);
+
     // Synchronizes Gpu such that time stamped event actually happens
     void sync() const;
 

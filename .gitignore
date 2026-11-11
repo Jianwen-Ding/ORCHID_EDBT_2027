@@ -24,6 +24,8 @@ dist/
 *.index
 *.cagra
 *.DS_Store
+._*
+/orchid/utils_cpp/src/_cluster_legals_gpu_kernel.cu
 *.helper
 *.vscode
 /.helper-logs/

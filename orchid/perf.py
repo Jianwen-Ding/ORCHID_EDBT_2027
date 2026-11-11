@@ -538,13 +538,14 @@ async def main():
                 stage_start = perf_counter()
                 # Create GPU Alternative here (Id -> Bitmap )
                 if use_gpu:
-                    mi, stamp = materialize_results_gpu(predicate_results, n)
+                    mi, start_stamp, materialize_results_stamp = materialize_results_gpu(predicate_results, n)
                     mi = (await mi.collect_to_cpu()).reshape(size, bytes_per_query)
                 else:
+                    stage_start = perf_counter()
                     mi = materialize_results(
                         predicate_results, n, predicate_bitmap[:size], threads=0
                     )
-                mask_materialize_time = perf_counter() - stage_start
+                    mask_materialize_time = perf_counter() - stage_start
 
                 if not args.val_flat:
                     stage_start = perf_counter()
@@ -623,6 +624,12 @@ async def main():
                 returned[rows][valid] = internal_to_external[indices[valid]]
 
                 batch_total_time = perf_counter() - batch_start
+
+                if use_gpu:
+                    mask_materialize_time = (await materialize_results_stamp) - (await start_stamp) 
+                    # Convert to seconds
+                    mask_materialize_time = mask_materialize_time / 1000
+
                 if record:
                     accounted_components = [
                         predicate_eval_time,
