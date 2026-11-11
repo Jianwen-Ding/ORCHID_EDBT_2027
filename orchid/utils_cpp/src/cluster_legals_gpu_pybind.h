@@ -313,6 +313,8 @@ public:
 
     PyFuture getStartTimeStamp();
     PyFuture getEndTimeStamp();
+    // Makes an external stream (raw integer handle, e.g. from FAISS) wait on this promise.
+    void makeStreamWait(int64_t stream);
 };
 
 // Prepares a buffer of numberic values to be uploaded to the gpu
@@ -452,6 +454,9 @@ inline PyFuture GpuPromise::getStartTimeStamp() {
 }
 inline PyFuture GpuPromise::getEndTimeStamp() {
     return detail::makeTimeStampFuture(m_data->getEndTimeStamp());
+}
+inline void GpuPromise::makeStreamWait(int64_t stream) {
+    m_data->makeStreamWait(stream);
 }
 inline PyFuture gpuPrep_out_py(py::object item) {
     return detail::SpanUtil::formatGpuUpload(std::move(item));
@@ -636,6 +641,9 @@ inline PyFuture GpuPromise::getStartTimeStamp() {
 inline PyFuture GpuPromise::getEndTimeStamp() {
     throw std::runtime_error("GPU backend not compiled");
 }
+inline void GpuPromise::makeStreamWait(int64_t stream) {
+    throw std::runtime_error("GPU backend not compiled");
+}
 inline py::object gpuPrep_out_py(py::object item) {
     throw std::runtime_error("GPU backend not compiled");
 }
@@ -668,15 +676,18 @@ inline GpuSpan<float> cluster_legals_preordered_packed_gpu_out_py (
 
 inline void addGpuModule(py::module_ &m) {
     py::class_<GpuBuffer>(m, "GpuBuffer")
-        .def_readonly("data", &GpuBuffer::m_data)
         .def_readonly("size", &GpuBuffer::m_size)
-        .def_readonly("promise", &GpuBuffer::m_promise);
+        .def_readonly("promise", &GpuBuffer::m_promise)
+        .def_property_readonly("data_ptr", [](const GpuBuffer& b) {
+            return static_cast<int64_t>(reinterpret_cast<uintptr_t>(b.m_data));
+        });
 
     py::class_<GpuPromise, std::shared_ptr<GpuPromise>>(m, "GpuPromise")
         .def("collect_buffer_async", &GpuPromise::collectBufferAsync)
         .def("collect_buffer_sync", &GpuPromise::collectBufferSync)
         .def("get_start_time_stamp", &GpuPromise::getStartTimeStamp)
-        .def("get_end_time_stamp", &GpuPromise::getEndTimeStamp);
+        .def("get_end_time_stamp", &GpuPromise::getEndTimeStamp)
+        .def("make_stream_wait", &GpuPromise::makeStreamWait, py::arg("stream"));
     detail::SpanUtil::addAllSupportedGpuSpan(m);
     m.def("gpu_prep", &gpuPrep_out_py, py::arg("item"));
     m.def("upload_to_gpu", &uploadToGpu_out_py);

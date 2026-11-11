@@ -603,21 +603,26 @@ async def main():
                     stage_start = perf_counter()
 
                 if use_gpu:
-                    mi = (await mi.collect_to_cpu()).reshape(size, bytes_per_query)
-                sel = faiss.IDSelector2DBitmap(mi)
-
-                # Put GPU alternative that directly puts existing bitmask buffer on gpu here 
-                params.sel2d = sel
-                params.selBitMask = sel.getBitmask()
+                    bitmask = faiss.IDBitmaskArray(mi, size, bytes_per_query, n)
+                    params.selBitMask = bitmask
+                    mi.promise.make_stream_wait(faiss.cast_cudastream_t_to_integer(
+                        _gpu_resources.getDefaultStream(args.gpu_device)))
+                    bytes_per_bitmap, debug_nq = bytes_per_query, size
+                else:
+                    sel = faiss.IDSelector2DBitmap(mi)
+                    params.sel2d = sel
+                    bitmask = sel.getBitmask()
+                    params.selBitMask = bitmask
+                    bytes_per_bitmap = mi.shape[1] if mi.ndim == 2 else None
+                    debug_nq = mi.shape[0]
 
                 search_prep_time = perf_counter() - stage_start
 
                 stage_start = perf_counter()
                 if debug:
-                    bytes_per_bitmap = mi.shape[1] if mi.ndim == 2 else None
                     print(
                         "debug: search_preassigned start "
-                        f"batch={i} B={mi.shape[0]} bytes_per_bitmap={bytes_per_bitmap} "
+                        f"batch={i} B={debug_nq} bytes_per_bitmap={bytes_per_bitmap} "
                         f"nprobe={n_probe} ntotal={getattr(index, 'ntotal', 'n/a')}",
                         flush=True,
                     )

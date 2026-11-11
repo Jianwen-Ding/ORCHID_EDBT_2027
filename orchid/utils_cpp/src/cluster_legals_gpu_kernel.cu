@@ -141,6 +141,14 @@ void PromiseData::sync() const {
     }
 }
 
+void PromiseData::makeStreamWait(int64_t stream) const {
+    if (!m_endEvent) {
+        throw std::runtime_error("Promise must be finalized before another stream can wait on it");
+    }
+    checkGpuStatus(cudaStreamWaitEvent(
+        reinterpret_cast<cudaStream_t>(stream), m_endEvent.get(), 0));
+}
+
 std::shared_ptr<const ReadbackPromiseData> GpuPromiseData::collectRawCpuCopy() const {
     std::shared_ptr<ReadbackPromiseData> result = std::make_shared<ReadbackPromiseData>(m_size, m_stream);
     result->uploadGpuDataAsync(m_data, m_size, 0);

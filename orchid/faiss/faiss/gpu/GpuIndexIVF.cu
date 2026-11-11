@@ -467,7 +467,30 @@ void GpuIndexIVF::search_preassigned(
     const uint8_t* selectorBitmapPtr = nullptr;
     size_t selectorBitmapStride = 0;
 
-    if (params && params->sel2d) {
+    if (params && params->selBitMask &&
+        (params->selBitMask->deviceOwnership & BitmaskOwnership::GpuOwned)) {
+        // Caller-provided device bitmap: used in place, no host round trip.
+        // The caller must order its producing stream before this index's default stream.
+        const IDBitmaskArray* bitmask = params->selBitMask;
+        FAISS_THROW_IF_NOT_MSG(
+                params->sel == nullptr,
+                "GpuIndexIVF: combining 1-D and 2-D selectors is not supported on GPU");
+        FAISS_THROW_IF_NOT_MSG(
+                bitmask->bytesPerBitmask > 0,
+                "IDBitmaskArray must provide bytesPerBitmask > 0");
+        FAISS_THROW_IF_NOT_FMT(
+                bitmask->queryCount >= n,
+                "IDBitmaskArray has queryCount=%zu but %ld queries were provided",
+                bitmask->queryCount,
+                n);
+        FAISS_THROW_IF_NOT_FMT(
+                bitmask->totalBitmaskCount >= this->ntotal,
+                "IDBitmaskArray universe (%zu) is smaller than index size (%ld)",
+                bitmask->totalBitmaskCount,
+                this->ntotal);
+        selectorBitmapStride = bitmask->bytesPerBitmask;
+        selectorBitmapPtr = bitmask->buffer;
+    } else if (params && params->sel2d) {
         FAISS_THROW_IF_NOT_MSG(
                 params->sel == nullptr,
                 "GpuIndexIVF: combining 1-D and 2-D selectors is not supported on GPU");

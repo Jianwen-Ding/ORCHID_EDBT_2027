@@ -78,6 +78,10 @@ public:
 
     // Forces event to be synced
     void sync() const;
+
+    // To avoid having raw pointer type in python, 
+    // integer is use as handle on Cuda stream.
+    void makeStreamWait(int64_t stream) const;
 };
 
 // Owns pinned Cpu data that may be in transit from the Gpu.
