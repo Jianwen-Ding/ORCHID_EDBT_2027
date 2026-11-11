@@ -207,8 +207,7 @@ __global__ void postingListKernel (
     const int64_t prevPostingSizes = queryIdx == 0 ? 0 : d_postingSizesShared[queryIdx - 1];
     const int64_t prevPostingThreads = queryIdx == 0 ? 0 : d_postingThreadsShared[queryIdx - 1];
     const int64_t queryStartIdx = prevPostingSizes + (threadGlobalIdx - prevPostingThreads) * threadWidth;
-    const int64_t queryEndIdx = queryStartIdx + threadWidth < d_postingSizesShared[queryIdx]
-        ? queryStartIdx + threadWidth : d_postingSizesShared[queryIdx];
+    const int64_t queryEndIdx = cuda::std::min(queryStartIdx + threadWidth, d_postingSizesShared[queryIdx]);
 
     const int64_t maskBegin = static_cast<int64_t>(bytesPerQuery) * d_postingQueries[queryIdx];
 
@@ -221,28 +220,81 @@ __global__ void postingListKernel (
     }
 }
 
-// Assigns each block their own cluster to go through
+__device__ static inline uint32_t popcount_bytes(const uint8_t* data, int32_t len) {
+  uint64_t total = 0;
+  int32_t i = 0;
+  for (; i + 8 <= len; i += 8) {
+    uint64_t v;
+    cuda::std::memcpy(&v, data + i, sizeof(uint64_t));
+    total += static_cast<uint64_t>(__popcll(v));
+  }
+  for (; i < len; ++i) {
+    total += static_cast<uint64_t>(__popcll(data[i]));
+  }
+  return static_cast<uint32_t>(total);
+}
+
 __global__ void clusterLegalsKernel (
     float* out,
-    const uint32_t* d_blockSums,
     const uint8_t* d_maskPackedBuffer,
     int32_t nQueries,
-    int32_t bytesPerQuery,
+    int32_t bytesPerEntry,
     const int32_t* d_clusterOffsets,
     const int32_t* d_clusterCounts,
     int32_t nList,
-    int32_t threadWidth) {
-    // Stores the individual sums
-    extern __shared__ uint16_t threadSums[];
-    
-    // For now this is incredibly naive
-    // TODO: Optimize
-    const int32_t clusterIdx = cub::LowerBound(d_blockSums, nList, static_cast<int32_t>(blockIdx.x));
-    const int32_t innerIdx = (static_cast<int32_t>(blockIdx.x) - d_blockSums[clusterIdx]) * threadWidth + threadIdx.x;
+    int32_t blockCount) {
 
-    // for (int i = 0 ; ) {
+    const int32_t blockQueries = ((nQueries + blockCount - 1) / blockCount);
+    const int32_t blockStart = blockIdx.x * blockQueries;
+    const int32_t blockEnd = cuda::std::min(blockStart + blockQueries, nQueries);
+     
+    const int32_t threadWidth = (nList + blockDim.x - 1)/ blockDim.x;
+    const int32_t threadStart = threadIdx.x * threadWidth;
+    const int32_t threadEnd = cuda::std::min(threadStart + threadWidth, nList);
+    for (int32_t q = blockStart; q < blockEnd ; ++q) {
+        const uint8_t* row =
+            d_maskPackedBuffer + static_cast<int64_t>(q) * bytesPerEntry;
+        float* out_row = out + static_cast<int64_t>(q) * nList;
+        for (int32_t c = threadStart; c < threadEnd ; ++c) {
+            int32_t start = d_clusterOffsets[c];
+            int32_t end = d_clusterOffsets[c + 1];
+            if (start >= end) {
+                out_row[c] = 0.0f;
+                continue;
+            }
 
-    // }
+            int32_t s_byte = start >> 3;
+            int32_t e_byte = end >> 3;
+            int32_t s_bit = start & 7;
+            int32_t e_bit = end & 7;
+
+            uint32_t sum = 0;
+            if (s_byte == e_byte) {
+                uint8_t mask =
+                    static_cast<uint8_t>(((1u << (e_bit - s_bit)) - 1u) << s_bit);
+                sum += static_cast<uint32_t>(__popc(row[s_byte] & mask));
+            } else {
+                if (s_bit != 0) {
+                    uint8_t mask = static_cast<uint8_t>(0xFFu << s_bit);
+                    sum += static_cast<uint32_t>(__popc(row[s_byte] & mask));
+                    s_byte += 1;
+                }
+
+                if (s_byte < e_byte) {
+                    sum += popcount_bytes(row + s_byte, e_byte - s_byte);
+                }
+
+                if (e_bit != 0) {
+                    uint8_t mask = static_cast<uint8_t>((1u << e_bit) - 1u);
+                    sum += static_cast<uint32_t>(__popc(row[e_byte] & mask));
+                }
+            }
+
+            int32_t cnt = d_clusterCounts[c];
+            out_row[c] = cnt > 0 ? static_cast<float>(sum) / static_cast<float>(cnt)
+                                : 0.0f;
+        }
+    }
 }
 struct ThreadWidthDivision {
     int32_t threadWidth{1};
@@ -263,10 +315,12 @@ std::shared_ptr<GpuPromiseData> predicate_results_to_bitmap_gpu_impl(
     const uint8_t* d_denseMasks,
     const int64_t* h_denseMaskQueries,
     int32_t nQueries,
-    int32_t bytesPerQuery,
+    int32_t nDocs,
     int32_t postingCount,
     int32_t denseMaskCount,
     int64_t postingEntries) {
+    // In order to better facilitate Cuda operations, the entire bitmask rounded to 4 bytes.
+    const int32_t bytesPerQuery = round(static_cast<size_t>((nDocs / 8 + (nDocs % 8 != 0))), 4);
     const size_t totalSize = static_cast<size_t>(nQueries) * bytesPerQuery;
     auto extendedPromise = funnelStreams(blockingPromises);
     auto ret = std::make_shared<GpuPromiseData>(totalSize, extendedPromise);
@@ -327,9 +381,23 @@ std::shared_ptr<GpuPromiseData> cluster_legals_preordered_packed_gpu_impl (
     std::vector<StreamCapsule> blockingPromises,
     const uint8_t* d_maskPackedBuffer,
     int32_t nQueries,
-    int32_t bytesPerQuery,
+    int32_t nDocs,
     const int32_t* d_clusterOffsets,
     const int32_t* d_clusterCounts,
     int32_t nList) {
-    throw std::runtime_error("GPU cluster legals kernel not implemented");
+    // Matches the 4-byte row stride of predicate_results_to_bitmap_gpu_impl.
+    const int32_t bytesPerEntry = round(static_cast<size_t>(nDocs / 8 + (nDocs % 8 != 0)), 4);
+    const size_t totalSize = static_cast<size_t>(nQueries) * nList * sizeof(float);
+    auto extendedPromise = funnelStreams(blockingPromises);
+    auto ret = std::make_shared<GpuPromiseData>(totalSize, extendedPromise);
+    const cudaStream_t stream = extendedPromise.get();
+
+    // One block per query, with the block's threads splitting the clusters.
+    clusterLegalsKernel<<<nQueries, 256, 0, stream>>>(
+        static_cast<float*>(ret->getData()), d_maskPackedBuffer, nQueries, bytesPerEntry,
+        d_clusterOffsets, d_clusterCounts, nList, nQueries);
+    checkGpuStatus(cudaGetLastError());
+
+    ret->finalizePromise();
+    return ret;
 }

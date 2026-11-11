@@ -130,7 +130,7 @@ std::shared_ptr<GpuPromiseData> predicate_results_to_bitmap_gpu_impl (
     const uint8_t* d_denseMasks,
     const int64_t* h_denseMaskQueries,
     int32_t nQueries,
-    int32_t bytesPerQuery,
+    int32_t nDocs,
     int32_t postingCount,
     int32_t denseMaskCount,
     int64_t postingEntries);
@@ -140,7 +140,7 @@ std::shared_ptr<GpuPromiseData> cluster_legals_preordered_packed_gpu_impl (
     std::vector<StreamCapsule> blockingPromises,
     const uint8_t* d_maskPackedBuffer,
     int32_t nQueries,
-    int32_t bytesPerQuery,
+    int32_t nDocs,
     const int32_t* d_clusterOffsets,
     const int32_t* d_clusterCounts,
     int32_t nList);

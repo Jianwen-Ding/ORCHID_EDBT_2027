@@ -535,7 +535,6 @@ inline GpuSpan<uint8_t> predicateResultsToBitmapGpu_out_py (
     int32_t n_docs) {
     if (n_queries < 0) throw py::value_error("n_queries must be nonnegative");
     if (n_docs <= 0) throw py::value_error("n_docs must be positive");
-    const int32_t bytes_per_query = n_docs / 8 + (n_docs % 8 != 0);
 
     // Span sizes count elements. Check metadata without downloading GPU contents.
     const auto elementCount = [](const auto& span, const char* name) {
@@ -563,9 +562,9 @@ inline GpuSpan<uint8_t> predicateResultsToBitmapGpu_out_py (
     if (posting_query_count == 0 && posting_count != 0) {
         throw py::value_error("posting_lists must be empty when there are no posting queries");
     }
-    const size_t width = static_cast<size_t>(bytes_per_query);
-    if (mask_query_count > std::numeric_limits<size_t>::max() / width ||
-        mask_bytes != mask_query_count * width) {
+    const size_t byte_width = n_docs / 8 + (n_docs % 8 != 0);
+    if (mask_query_count > std::numeric_limits<size_t>::max() / byte_width ||
+        mask_bytes != mask_query_count * byte_width) {
         throw py::value_error("dense_masks must contain ceil(n_docs / 8) bytes per dense query");
     }
     for (size_t i = 0; i < mask_query_count; ++i) {
@@ -580,7 +579,7 @@ inline GpuSpan<uint8_t> predicateResultsToBitmapGpu_out_py (
         static_cast<const int32_t*>(posting_queries.getBuffer().m_data),
         static_cast<const uint8_t*>(dense_masks.getBuffer().m_data), 
         dense_mask_queries.data(),
-        n_queries, bytes_per_query,
+        n_queries, n_docs,
         static_cast<int32_t>(posting_query_count), static_cast<int32_t>(mask_query_count),
         static_cast<int64_t>(posting_count)));
     return result->collectBufferAsync();
@@ -589,7 +588,6 @@ inline GpuSpan<uint8_t> predicateResultsToBitmapGpu_out_py (
 inline GpuSpan<float> cluster_legals_preordered_packed_gpu_out_py (
     const GpuSpan<uint8_t> mask_packed_buffer,
     int32_t n_queries,
-    int32_t bytes_per_query,
     int32_t n_docs,
     const GpuSpan<int32_t> cluster_offsets,
     const GpuSpan<int32_t> cluster_counts,
@@ -598,7 +596,7 @@ inline GpuSpan<float> cluster_legals_preordered_packed_gpu_out_py (
 
     auto result = std::make_shared<GpuPromise>(cluster_legals_preordered_packed_gpu_impl(
         detail::gatherPromises({&mask_packed_buffer, &cluster_offsets, &cluster_counts}),
-        static_cast<const uint8_t*>(mask_packed_buffer.getBuffer().m_data), n_queries, bytes_per_query,
+        static_cast<const uint8_t*>(mask_packed_buffer.getBuffer().m_data), n_queries, n_docs,
         static_cast<const int32_t*>(cluster_offsets.getBuffer().m_data), 
         static_cast<const int32_t*>(cluster_counts.getBuffer().m_data), 
         n_list));
@@ -656,10 +654,9 @@ inline GpuSpan<uint8_t> predicateResultsToBitmapGpu_out_py (
     throw std::runtime_error("GPU backend not compiled");
 }
 
-inline <GpuSpan<float>> cluster_legals_preordered_packed_gpu_out_py (
+inline GpuSpan<float> cluster_legals_preordered_packed_gpu_out_py (
     const GpuSpan<uint8_t> mask_packed_buffer,
     int32_t n_queries,
-    int32_t bytes_per_query,
     int32_t n_docs,
     const GpuSpan<int32_t> cluster_offsets,
     const GpuSpan<int32_t> cluster_counts,
@@ -687,4 +684,7 @@ inline void addGpuModule(py::module_ &m) {
           py::arg("posting_lists"), py::arg("posting_sizes"), py::arg("posting_queries"),
           py::arg("dense_masks"), py::arg("dense_mask_queries"),
           py::arg("n_queries"), py::arg("n_docs"));
+    m.def("cluster_legals_preordered_packed", &cluster_legals_preordered_packed_gpu_out_py,
+          py::arg("mask_packed_buffer"), py::arg("n_queries"), py::arg("n_docs"),
+          py::arg("cluster_offsets"), py::arg("cluster_counts"), py::arg("n_list"));
 }
