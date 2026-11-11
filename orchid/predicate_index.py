@@ -392,7 +392,7 @@ def materialize_results_gpu(
     results: list[PredicateResult],
     n_docs: int,
 ) -> tuple[gpu.byte_gpu_span,  asyncio.Future,  asyncio.Future ]:
-    """Return a GPU-resident packed batch and the kernel's optional future."""
+    """ Returns a span that is being created by the Gpu of the materialized bitmask"""
     posting_lists = []
     posting_list_sizes = []
     bit_masks = []

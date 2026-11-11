@@ -234,6 +234,8 @@ __device__ static inline uint32_t popcount_bytes(const uint8_t* data, int32_t le
   return static_cast<uint32_t>(total);
 }
 
+// TODO: likely horribly optimized
+// Fix later
 __global__ void clusterLegalsKernel (
     float* out,
     const uint8_t* d_maskPackedBuffer,
@@ -319,8 +321,7 @@ std::shared_ptr<GpuPromiseData> predicate_results_to_bitmap_gpu_impl(
     int32_t postingCount,
     int32_t denseMaskCount,
     int64_t postingEntries) {
-    // In order to better facilitate Cuda operations, the entire bitmask rounded to 4 bytes.
-    const int32_t bytesPerQuery = round(static_cast<size_t>((nDocs / 8 + (nDocs % 8 != 0))), 4);
+    const int32_t bytesPerQuery = nDocs / 8 + (nDocs % 8 != 0);
     const size_t totalSize = static_cast<size_t>(nQueries) * bytesPerQuery;
     auto extendedPromise = funnelStreams(blockingPromises);
     auto ret = std::make_shared<GpuPromiseData>(totalSize, extendedPromise);
@@ -385,8 +386,8 @@ std::shared_ptr<GpuPromiseData> cluster_legals_preordered_packed_gpu_impl (
     const int32_t* d_clusterOffsets,
     const int32_t* d_clusterCounts,
     int32_t nList) {
-    // Matches the 4-byte row stride of predicate_results_to_bitmap_gpu_impl.
-    const int32_t bytesPerEntry = round(static_cast<size_t>(nDocs / 8 + (nDocs % 8 != 0)), 4);
+    // Matches the row stride of predicate_results_to_bitmap_gpu_impl.
+    const int32_t bytesPerEntry = nDocs / 8 + (nDocs % 8 != 0);
     const size_t totalSize = static_cast<size_t>(nQueries) * nList * sizeof(float);
     auto extendedPromise = funnelStreams(blockingPromises);
     auto ret = std::make_shared<GpuPromiseData>(totalSize, extendedPromise);

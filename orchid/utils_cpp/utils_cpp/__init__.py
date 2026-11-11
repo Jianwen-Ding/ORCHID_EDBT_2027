@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import numpy as np
 
 from . import _cluster_legals as _impl
@@ -99,6 +101,28 @@ def predicate_results_to_mask(
         posting_lists, dense_masks, n_docs, out, int(threads)
     )
 
+def cluster_legals_gpu(
+    mask_packed: gpu.byte_gpu_span,
+    cluster_offsets: np.ndarray,
+    cluster_counts: np.ndarray,
+    n_queries: int,
+    n_docs: int,
+) -> tuple[gpu.float_gpu_span,  asyncio.Future]:
+    """Gets the percentage of active predicates in each cluster"""
+    if cluster_offsets is None or cluster_counts is None:
+        raise ValueError("cluster_offsets and cluster_counts are required")
+    n_list = int(cluster_counts.shape[0])
+
+    upload_to_gpu(
+        cluster_offsets_gpu := gpu_prep(cluster_offsets),
+        cluster_counts_gpu := gpu_prep(cluster_counts))
+
+    percentage_span = gpu.cluster_legals_preordered_packed(
+        mask_packed, n_queries, n_docs, cluster_offsets_gpu, cluster_counts_gpu, n_list)
+    
+    end_stamp = percentage_span.promise.get_end_time_stamp()
+    return (percentage_span, end_stamp)
+    
 
 def cluster_legals(
     mask_packed: np.ndarray,

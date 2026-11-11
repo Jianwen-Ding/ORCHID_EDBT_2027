@@ -44,7 +44,9 @@ from src.build_ivf_config import BuildIvfConfig, load_build_ivf_config
 from src.dataset_config import DatasetConfig, load_dataset_config
 from progress import Progress
 from utils_cpp import (
+    gpu,
     cluster_legals,
+    cluster_legals_gpu,
     prepare_cluster_order,
     topk_small,
 )
@@ -539,7 +541,6 @@ async def main():
                 # Create GPU Alternative here (Id -> Bitmap )
                 if use_gpu:
                     mi, start_stamp, materialize_results_stamp = materialize_results_gpu(predicate_results, n)
-                    mi = (await mi.collect_to_cpu()).reshape(size, bytes_per_query)
                 else:
                     stage_start = perf_counter()
                     mi = materialize_results(
@@ -554,13 +555,25 @@ async def main():
 
                     # Create GPU Alternative here (Bitmap -> Cluster percentage legal)
                     if args.alpha != 0.0 or beta != 0.0:
-                        cluster_legals(
-                            mi,
-                            offsets,
-                            counts,
-                            out=out_legals_batch[:size],
-                            threads=0,
-                        )
+                        if use_gpu:
+                            out_legals_batch_span, _ = cluster_legals_gpu(
+                                mi,
+                                offsets,
+                                counts,
+                                size,
+                                n,
+                            )
+                            out_legals_batch[:size] = np.asarray(
+                                await out_legals_batch_span.collect_to_cpu()
+                            ).reshape(size, n_lists)
+                        else:
+                            cluster_legals(
+                                mi,
+                                offsets,
+                                counts,
+                                out=out_legals_batch[:size],
+                                threads=0,
+                            )
                     # Ideally pull cpu from gpu here
                     if args.alpha != 0.0 or beta != 0.0:
                         pred_term = predicate_log_scores(
@@ -589,6 +602,8 @@ async def main():
                     cluster_scoring_time = cluster_rank_time = 0.0
                     stage_start = perf_counter()
 
+                if use_gpu:
+                    mi = (await mi.collect_to_cpu()).reshape(size, bytes_per_query)
                 sel = faiss.IDSelector2DBitmap(mi)
 
                 # Put GPU alternative that directly puts existing bitmask buffer on gpu here 
