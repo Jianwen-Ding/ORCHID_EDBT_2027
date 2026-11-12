@@ -17,7 +17,7 @@ class GpuPredicateValidationTest(unittest.TestCase):
                     try:
                         span = gpu.gpu_prep(values)
                         self.assertEqual(span.size, expected)
-                        promise = gpu.upload_to_gpu(span)
+                        promise = gpu.upload(span)
                     except RuntimeError as error:
                         if "GPU backend not compiled" in str(error):
                             self.skipTest("GPU backend not compiled")
@@ -36,7 +36,7 @@ class GpuPredicateValidationTest(unittest.TestCase):
         mask_queries = values.pop("dense_mask_queries")
         try:
             spans = [gpu.gpu_prep(value) for value in values.values()]
-            promise = gpu.upload_to_gpu(*spans)
+            promise = gpu.upload(*spans)
         except RuntimeError as error:
             if "GPU backend not compiled" in str(error):
                 self.skipTest("GPU backend not compiled")

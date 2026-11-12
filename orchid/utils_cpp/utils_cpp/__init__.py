@@ -113,9 +113,9 @@ def cluster_legals_gpu(
         raise ValueError("cluster_offsets and cluster_counts are required")
     n_list = int(cluster_counts.shape[0])
 
-    upload_to_gpu(
-        cluster_offsets_gpu := gpu_prep(cluster_offsets),
-        cluster_counts_gpu := gpu_prep(cluster_counts))
+    gpu.upload(
+        cluster_offsets_gpu := gpu.prep(cluster_offsets),
+        cluster_counts_gpu := gpu.prep(cluster_counts))
 
     percentage_span = gpu.cluster_legals_preordered_packed(
         mask_packed, n_queries, n_docs, cluster_offsets_gpu, cluster_counts_gpu, n_list)

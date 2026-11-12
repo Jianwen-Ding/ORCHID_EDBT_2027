@@ -14,9 +14,9 @@ class GpuPredicateBitmapTest(unittest.IsolatedAsyncioTestCase):
             spans = [gpu.gpu_prep(value) for value in values]
             if separate_uploads:
                 for span in spans:
-                    gpu.upload_to_gpu(span)
+                    gpu.upload(span)
             else:
-                gpu.upload_to_gpu(*spans)
+                gpu.upload(*spans)
         except RuntimeError as error:
             if "GPU backend not compiled" in str(error):
                 self.skipTest("GPU backend not compiled")

@@ -690,7 +690,7 @@ inline void addGpuModule(py::module_ &m) {
         .def("make_stream_wait", &GpuPromise::makeStreamWait, py::arg("stream"));
     detail::SpanUtil::addAllSupportedGpuSpan(m);
     m.def("gpu_prep", &gpuPrep_out_py, py::arg("item"));
-    m.def("upload_to_gpu", &uploadToGpu_out_py);
+    m.def("upload", &uploadToGpu_out_py);
     m.def("predicate_results_to_bitmap", &predicateResultsToBitmapGpu_out_py,
           py::arg("posting_lists"), py::arg("posting_sizes"), py::arg("posting_queries"),
           py::arg("dense_masks"), py::arg("dense_mask_queries"),

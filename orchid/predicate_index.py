@@ -409,11 +409,11 @@ def materialize_results_gpu(
         else:
             raise TypeError("GPU bitmap materialization requires PostingList or PackedBitmap results")
     
-    upload_promise = gpu.upload_to_gpu(
-        posting_list_span := gpu.gpu_prep(posting_lists if posting_lists else _EMPTY_IDS),
-        list_sizing_span := gpu.gpu_prep(np.asarray(posting_list_sizes, dtype=np.int32)),
-        list_indices_span := gpu.gpu_prep(np.asarray(list_indices, dtype=np.int32)),
-        bit_mask_span := gpu.gpu_prep(bit_masks if bit_masks else np.empty(0, dtype=np.uint8)),
+    upload_promise = gpu.upload(
+        posting_list_span := gpu.prep(posting_lists if posting_lists else _EMPTY_IDS),
+        list_sizing_span := gpu.prep(np.asarray(posting_list_sizes, dtype=np.int32)),
+        list_indices_span := gpu.prep(np.asarray(list_indices, dtype=np.int32)),
+        bit_mask_span := gpu.prep(bit_masks if bit_masks else np.empty(0, dtype=np.uint8)),
     )
     bitmask_span = gpu.predicate_results_to_bitmap(
         posting_list_span,

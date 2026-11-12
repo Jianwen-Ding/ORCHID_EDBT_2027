@@ -7,7 +7,7 @@ project directory itself is on `sys.path`.
 from .utils_cpp import (
     gpu,
     gpu_prep,
-    upload_to_gpu,
+    upload,
     cluster_legals,
     cluster_legals_gpu,
     evaluate_predicate_conjunctions,
@@ -23,7 +23,7 @@ from .utils_cpp import (
 __all__ = [
     "gpu",
     "gpu_prep",
-    "upload_to_gpu",
+    "upload",
     "topk_small",
     "cluster_legals",
     "cluster_legals_gpu",

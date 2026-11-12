@@ -121,7 +121,7 @@ class PredicateGpuArgumentsTest(unittest.TestCase):
         ):
             self.assertEqual(actual.dtype, dtype)
             np.testing.assert_array_equal(actual, expected)
-        api.upload_to_gpu.assert_called_once_with(*spans)
+        api.upload.assert_called_once_with(*spans)
         api.predicate_results_to_bitmap.assert_called_once_with(*spans, mask_queries, 3, 19)
         self.assertIs(result, api.predicate_results_to_bitmap.return_value)
 
@@ -145,7 +145,7 @@ class PredicateGpuArgumentsTest(unittest.TestCase):
                 self.assertEqual(mask_queries.dtype, np.int64)
                 np.testing.assert_array_equal(
                     mask_queries, [i for i, result in enumerate(results) if isinstance(result, PackedBitmap)])
-                api.upload_to_gpu.assert_called_once_with(*spans)
+                api.upload.assert_called_once_with(*spans)
                 api.predicate_results_to_bitmap.assert_called_once_with(
                     *spans, mask_queries, len(results), 19)
 
@@ -155,7 +155,7 @@ class PredicateGpuArgumentsTest(unittest.TestCase):
                 materialize_results_gpu(
                     [ByteMask(np.zeros(19, dtype=np.uint8))], 19,
                 )
-            api.upload_to_gpu.assert_not_called()
+            api.upload.assert_not_called()
 
 
 if __name__ == "__main__":
