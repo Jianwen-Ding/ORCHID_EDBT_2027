@@ -29,13 +29,14 @@ StreamCapsule::StreamCapsule() {
     m_stream.reset(stream, [](cudaStream_t s) { cudaStreamDestroy(s); });
 }
 
-// Funnels a number of promises into a single gpu promise
-static StreamCapsule funnelStreams(const std::vector<StreamCapsule>& streams) {
-    // TODO: A bit arbitrary might need some specification or something
-    // given that only one group of promises is expected for now its fine
-    StreamCapsule extendedStream = streams[0];
-    for (size_t i = 1 ; i < streams.size() ; i++) {
-        streams[i].sync();
+// Funnels a number of promises into a single Gpu stream.
+static StreamCapsule funnelStreams(const std::vector<const PromiseData*>& promises) {
+    if (promises.empty()) {
+        return StreamCapsule();
+    }
+    StreamCapsule extendedStream = promises.front()->getStream();
+    for (int i = 1 ; i < promises.size() ; i++) {
+        promises[i]->makeStreamWait(extendedStream);
     }
     return extendedStream;
 }
@@ -141,6 +142,13 @@ void PromiseData::sync() const {
     }
 }
 
+void PromiseData::makeStreamWait(StreamCapsule stream) const {
+    if (!m_endEvent) {
+        throw std::runtime_error("Promise must be finalized before another stream can wait on it");
+    }
+    checkGpuStatus(cudaStreamWaitEvent(
+        stream.get(), m_endEvent.get(), 0));
+}
 void PromiseData::makeStreamWait(int64_t stream) const {
     if (!m_endEvent) {
         throw std::runtime_error("Promise must be finalized before another stream can wait on it");
@@ -318,7 +326,7 @@ struct ThreadWidthDivision {
 };
 
 std::shared_ptr<GpuPromiseData> predicate_results_to_bitmap_gpu_impl(
-    std::vector<StreamCapsule> blockingPromises,
+    std::vector<const PromiseData*> blockingPromises,
     const uint32_t* d_postingLists,
     const int32_t* d_postingSizes,
     const int32_t* d_postingQueries,
@@ -387,7 +395,7 @@ std::shared_ptr<GpuPromiseData> predicate_results_to_bitmap_gpu_impl(
 
 
 std::shared_ptr<GpuPromiseData> cluster_legals_preordered_packed_gpu_impl (
-    std::vector<StreamCapsule> blockingPromises,
+    std::vector<const PromiseData*> blockingPromises,
     const uint8_t* d_maskPackedBuffer,
     int32_t nQueries,
     int32_t nDocs,

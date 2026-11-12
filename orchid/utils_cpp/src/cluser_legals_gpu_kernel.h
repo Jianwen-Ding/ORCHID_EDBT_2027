@@ -79,6 +79,7 @@ public:
     // Forces event to be synced
     void sync() const;
 
+    void makeStreamWait(StreamCapsule stream) const;
     // To avoid having raw pointer type in python, 
     // integer is use as handle on Cuda stream.
     void makeStreamWait(int64_t stream) const;
@@ -127,7 +128,7 @@ public:
 };
 
 std::shared_ptr<GpuPromiseData> predicate_results_to_bitmap_gpu_impl (
-    std::vector<StreamCapsule> blockingPromises,
+    std::vector<const PromiseData*> blockingPromises,
     const uint32_t* d_postingLists,
     const int32_t* d_postingSizes,
     const int32_t* d_postingQueries,
@@ -141,7 +142,7 @@ std::shared_ptr<GpuPromiseData> predicate_results_to_bitmap_gpu_impl (
 
 
 std::shared_ptr<GpuPromiseData> cluster_legals_preordered_packed_gpu_impl (
-    std::vector<StreamCapsule> blockingPromises,
+    std::vector<const PromiseData*> blockingPromises,
     const uint8_t* d_maskPackedBuffer,
     int32_t nQueries,
     int32_t nDocs,

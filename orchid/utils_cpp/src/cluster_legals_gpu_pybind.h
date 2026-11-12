@@ -388,15 +388,15 @@ namespace detail {
         return py::cast(value);
     }
     
-    inline std::vector<StreamCapsule> gatherPromises(std::vector<const GpuBuffer*> buffers) {
-        std::vector<StreamCapsule> ret;
-        for (size_t i = 0 ; i < buffers.size() ; i += 1) {
-            if (!buffers[i]->m_promise) {
+    inline std::vector<const PromiseData*> gatherPromises(std::vector<const GpuBuffer*> buffers) {
+        std::vector<const PromiseData*> ret;
+        for (const GpuBuffer* buffer : buffers) {
+            if (!buffer->m_promise || !buffer->m_promise->m_data) {
                 throw std::runtime_error("Span has not been uploaded to the GPU yet");
             }
-            StreamCapsule stream = buffers[i]->m_promise->m_data->getStream();
-            if (std::find(ret.begin(), ret.end(), stream) == ret.end()) {
-                ret.push_back(stream);
+            const PromiseData* promise = buffer->m_promise->m_data.get();
+            if (std::find(ret.begin(), ret.end(), promise) == ret.end()) {
+                ret.push_back(promise);
             }
         }
         return ret;
