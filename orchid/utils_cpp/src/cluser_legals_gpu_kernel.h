@@ -149,3 +149,13 @@ std::shared_ptr<GpuPromiseData> cluster_legals_preordered_packed_gpu_impl (
     const int32_t* d_clusterOffsets,
     const int32_t* d_clusterCounts,
     int32_t nList);
+
+std::shared_ptr<const ReadbackPromiseData> get_top_rankings_gpu_impl (
+    std::vector<const PromiseData*> blockingPromises,
+    const float* d_clusteredLegals,
+    const float* d_clusterDist,
+    int32_t nQueries,
+    int32_t nList,
+    int32_t nProbe,
+    float beta,
+    float eps);

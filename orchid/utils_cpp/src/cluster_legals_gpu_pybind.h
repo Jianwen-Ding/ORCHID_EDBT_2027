@@ -608,6 +608,36 @@ inline GpuSpan<float> cluster_legals_preordered_packed_gpu_out_py (
     return GpuSpan<float>(result->m_data->getData(), result->m_data->getSize() / sizeof(float), result);
 }
 
+inline py::tuple get_top_rankings_out_py (
+    const GpuSpan<float> clustered_legals,
+    const GpuSpan<float> cluster_dist,
+    int32_t n_queries,
+    int32_t n_list,
+    int32_t n_probe,
+    float beta,
+    float eps) {
+    if (n_queries < 0) throw py::value_error("n_queries must be nonnegative");
+    if (n_list < 0) throw py::value_error("n_list must be nonnegative");
+    if (n_probe <= 0 || n_probe > n_list) {
+        throw py::value_error("n_probe must be in [1, n_list]");
+    }
+    const auto& buffer = clustered_legals.getBuffer();
+    const auto& distances = cluster_dist.getBuffer();
+    if (buffer.m_size != static_cast<size_t>(n_queries) * static_cast<size_t>(n_list) ||
+        distances.m_size != buffer.m_size) {
+        throw py::value_error("clustered_legals and cluster_dist must contain n_queries * n_list elements");
+    }
+
+    auto result = get_top_rankings_gpu_impl(
+        detail::gatherPromises({&clustered_legals, &cluster_dist}),
+        static_cast<const float*>(buffer.m_data),
+        static_cast<const float*>(distances.m_data),
+        n_queries, n_list, n_probe, beta, eps);
+    return py::make_tuple(
+        detail::makeReadbackFuture(result, detail::convertSpanData<int64_t>),
+        detail::makeTimeStampFuture(result->getEndTimeStamp()));
+}
+
 #else
 
 // If Gpu logic is not support it should throw on any GPU specific logic 
@@ -672,6 +702,17 @@ inline GpuSpan<float> cluster_legals_preordered_packed_gpu_out_py (
     throw std::runtime_error("GPU backend not compiled");
 }
 
+inline py::tuple get_top_rankings_out_py (
+    const GpuSpan<float> clustered_legals,
+    const GpuSpan<float> cluster_dist,
+    int32_t n_queries,
+    int32_t n_list,
+    int32_t n_probe,
+    float beta,
+    float eps) {
+    throw std::runtime_error("GPU backend not compiled");
+}
+
 #endif
 
 inline void addGpuModule(py::module_ &m) {
@@ -689,7 +730,7 @@ inline void addGpuModule(py::module_ &m) {
         .def("get_end_time_stamp", &GpuPromise::getEndTimeStamp)
         .def("make_stream_wait", &GpuPromise::makeStreamWait, py::arg("stream"));
     detail::SpanUtil::addAllSupportedGpuSpan(m);
-    m.def("gpu_prep", &gpuPrep_out_py, py::arg("item"));
+    m.def("prep", &gpuPrep_out_py, py::arg("item"));
     m.def("upload", &uploadToGpu_out_py);
     m.def("predicate_results_to_bitmap", &predicateResultsToBitmapGpu_out_py,
           py::arg("posting_lists"), py::arg("posting_sizes"), py::arg("posting_queries"),
@@ -698,4 +739,8 @@ inline void addGpuModule(py::module_ &m) {
     m.def("cluster_legals_preordered_packed", &cluster_legals_preordered_packed_gpu_out_py,
           py::arg("mask_packed_buffer"), py::arg("n_queries"), py::arg("n_docs"),
           py::arg("cluster_offsets"), py::arg("cluster_counts"), py::arg("n_list"));
+    m.def("get_top_rankings", &get_top_rankings_out_py,
+          py::arg("clustered_legals"), py::arg("cluster_dist"),
+          py::arg("n_queries"), py::arg("n_list"), py::arg("n_probe"),
+          py::arg("beta"), py::arg("eps") = 1e-9f);
 }

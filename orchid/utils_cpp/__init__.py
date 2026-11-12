@@ -6,13 +6,14 @@ project directory itself is on `sys.path`.
 
 from .utils_cpp import (
     gpu,
-    gpu_prep,
+    prep,
     upload,
     cluster_legals,
     cluster_legals_gpu,
     evaluate_predicate_conjunctions,
     ids_to_bitmap,
     log_scale,
+    get_top_rankings,
     predicate_results_to_bitmap,
     predicate_results_to_mask,
     prepare_cluster_order,
@@ -22,7 +23,7 @@ from .utils_cpp import (
 
 __all__ = [
     "gpu",
-    "gpu_prep",
+    "prep",
     "upload",
     "topk_small",
     "cluster_legals",
@@ -30,6 +31,7 @@ __all__ = [
     "evaluate_predicate_conjunctions",
     "ids_to_bitmap",
     "log_scale",
+    "get_top_rankings",
     "predicate_results_to_bitmap",
     "predicate_results_to_mask",
     "prepare_cluster_order",

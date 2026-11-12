@@ -47,6 +47,7 @@ from utils_cpp import (
     gpu,
     cluster_legals,
     cluster_legals_gpu,
+    get_top_rankings,
     prepare_cluster_order,
     topk_small,
 )
@@ -575,21 +576,37 @@ async def main():
                                 threads=0,
                             )
                     # Ideally pull cpu from gpu here
-                    if args.alpha != 0.0 or beta != 0.0:
-                        pred_term = predicate_log_scores(
-                            out_legals_batch[:size],
-                            beta,
-                            out=out_pred_batch[:size],
-                            threads=0,
-                        )
-                        pred_term = torch.from_numpy(pred_term)
-                        cluster_scores = cluster_dis + pred_term
+                    if use_gpu:
+                        if args.alpha != 0.0 or beta != 0.0:
+                            gpu.upload(cluster_dist_span := gpu.prep(
+                                np.ascontiguousarray(cluster_dis.cpu().numpy(), dtype=np.float32)
+                            ))
+                            rankings_future, end_predicate_stamp = get_top_rankings(
+                                out_legals_batch_span, cluster_dist_span,
+                                size, n_lists, n_probe, beta,
+                            )
+                            rankings_adj = torch.from_numpy(np.asarray(
+                                await rankings_future
+                            ).reshape(size, n_probe))
+                        else:
+                            rankings_adj = select_topk(cluster_dis)
                     else:
-                        cluster_scores = cluster_dis
-                    cluster_scoring_time = perf_counter() - stage_start
+                        if args.alpha != 0.0 or beta != 0.0:
+                            pred_term = predicate_log_scores(
+                                out_legals_batch[:size],
+                                beta,
+                                out=out_pred_batch[:size],
+                                threads=0,
+                            )
+                            pred_term = torch.from_numpy(pred_term)
+                            cluster_scores = cluster_dis + pred_term
+                        else:
+                            cluster_scores = cluster_dis
+                        cluster_scoring_time = perf_counter() - stage_start
+
+                        rankings_adj = select_topk(cluster_scores)
 
                     stage_start = perf_counter()
-                    rankings_adj = select_topk(cluster_scores)
                     cluster_rank_time = perf_counter() - stage_start
 
                     stage_start = perf_counter()

@@ -418,3 +418,45 @@ std::shared_ptr<GpuPromiseData> cluster_legals_preordered_packed_gpu_impl (
     ret->finalizePromise();
     return ret;
 }
+
+
+// TODO: stub, not implemented yet.
+// Rank clusters by distance + beta * log(legality + eps), returning nProbe IDs per query.
+__global__ void logScaleKernel (
+    int64_t* out,
+    const float* d_clusteredLegals,
+    const float* d_clusterDist,
+    int32_t nQueries,
+    int32_t nList,
+    int32_t nProbe,
+    float beta,
+    float eps) {
+}
+
+std::shared_ptr<const ReadbackPromiseData> get_top_rankings_gpu_impl (
+    std::vector<const PromiseData*> blockingPromises,
+    const float* d_clusteredLegals,
+    const float* d_clusterDist,
+    int32_t nQueries,
+    int32_t nList,
+    int32_t nProbe,
+    float beta,
+    float eps) {
+    const int64_t count = static_cast<int64_t>(nQueries) * nProbe;
+    const size_t totalSize = static_cast<size_t>(count) * sizeof(int64_t);
+    auto extendedPromise = funnelStreams(blockingPromises);
+    auto ret = std::make_shared<GpuPromiseData>(totalSize, extendedPromise);
+    const cudaStream_t stream = extendedPromise.get();
+
+    if (count > 0) {
+        constexpr int32_t threadsPerBlock = 256;
+        const int64_t blocks = (count + threadsPerBlock - 1) / threadsPerBlock;
+        logScaleKernel<<<static_cast<unsigned int>(blocks), threadsPerBlock, 0, stream>>>(
+            static_cast<int64_t*>(ret->getData()), d_clusteredLegals, d_clusterDist,
+            nQueries, nList, nProbe, beta, eps);
+        checkGpuStatus(cudaGetLastError());
+    }
+
+    ret->finalizePromise();
+    return ret->collectRawCpuCopy();
+}
